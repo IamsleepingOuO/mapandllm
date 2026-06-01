@@ -1,0 +1,22 @@
+# Python 快取
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 虛擬環境
+venv/
+env/
+
+# AI 模型與超大檔案
+*.pt
+*.pth
+*.onnx
+
+# 專案產生的暫存與上傳檔案
+uploads/
+*.csv
+map_output/
+
+# 作業系統產生的垃圾檔
+.DS_Store
+Thumbs.db

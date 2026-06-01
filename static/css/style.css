@@ -1,0 +1,16 @@
+.msg-text { white-space: pre-wrap; }
+.no-select { user-select: none; }
+body { overflow: hidden; touch-action: none; } 
+        
+.user-dot {
+    position: absolute;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: 2px solid white;
+    box-shadow: 0 0 10px rgba(0,0,0,0.5);
+    transform: translate(-50%, -50%); 
+    transition: left 0.4s linear, top 0.4s linear, transform 0.1s ease-out;
+    z-index: 20;
+    pointer-events: none;
+}
