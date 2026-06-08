@@ -68,7 +68,7 @@ function startSensors() {
     window.addEventListener('deviceorientation', (e) => {
         let raw = e.webkitCompassHeading || (360 - (e.alpha || 0));
         
-        // 🌟 簡單的一階低通濾波（權重 0.2），讓角度不會因為手震瞬間暴跳
+        // 簡單的一階低通濾波（權重 0.2），讓角度不會因為手震瞬間暴跳
         if (currentRawHeading === 0) {
             currentRawHeading = raw; // 第一次直接賦值
         } else {
@@ -112,8 +112,8 @@ function handleStepDetected() {
     let totalDx = Math.sin(rad) * customStepPx;
     let totalDy = -Math.cos(rad) * customStepPx;
     
-    // 🌟 物理引擎升級：將這「一步」切碎，每次最多只走 2 像素來探路
-    // 這樣就算牆壁只有 3 像素厚，也絕對不會發生「跨過去」的穿隧效應
+    // 將一步切為數個2像素
+    // 牆體為3像素，因此不會造成穿牆
     let maxSubSteps = Math.ceil(customStepPx / 2); 
     let stepDx = totalDx / maxSubSteps;
     let stepDy = totalDy / maxSubSteps;
@@ -157,7 +157,7 @@ function handleStepDetected() {
             break; 
         }
 
-        // 🌟 完美的沿牆滑行邏輯：哪裡沒擋住就往哪裡滑
+        // 沿牆滑行邏輯：
         if (canMoveX) walkX = testX;
         if (canMoveY) walkY = testY;
     }

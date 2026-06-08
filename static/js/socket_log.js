@@ -184,7 +184,7 @@ async function loadCollisionMap(roomId) {
         const response = await fetch(`/uploads/${roomId}/_0526_6.csv`);
         const csvText = await response.text();
         
-        // 強健的解析法：過濾掉空行、空白符號，並強制轉成整數
+        // 過濾掉空行、空白符號，並強制轉成整數
         collisionMatrix = csvText.trim().split('\n').map(row => {
             return row.split(',')
                       .filter(val => val.trim() !== "") // 濾掉結尾多餘的逗號
