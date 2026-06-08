@@ -153,7 +153,7 @@ function handleStepDetected() {
 
         // 如果走進死角 (X跟Y都撞牆)，就直接停止這一步剩下的位移
         if (!canMoveX && !canMoveY) {
-            console.log("撞到死角了！");
+            console.log("撞到死角");
             break; 
         }
 
