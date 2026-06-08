@@ -108,11 +108,66 @@ function handleStepDetected() {
     let relativeHeading = currentRawHeading - headingOffset;
     let rad = relativeHeading * (Math.PI / 180);
     
-    myPosition.x += Math.sin(rad) * customStepPx;
-    myPosition.y -= Math.cos(rad) * customStepPx;
+    // 計算出這個步伐的 X、Y 總分量
+    let totalDx = Math.sin(rad) * customStepPx;
+    let totalDy = -Math.cos(rad) * customStepPx;
+    
+    // 🌟 物理引擎升級：將這「一步」切碎，每次最多只走 2 像素來探路
+    // 這樣就算牆壁只有 3 像素厚，也絕對不會發生「跨過去」的穿隧效應
+    let maxSubSteps = Math.ceil(customStepPx / 2); 
+    let stepDx = totalDx / maxSubSteps;
+    let stepDy = totalDy / maxSubSteps;
+
+    let walkX = myPosition.x;
+    let walkY = myPosition.y;
+
+    for (let i = 0; i < maxSubSteps; i++) {
+        let testX = walkX + stepDx;
+        let testY = walkY + stepDy;
+        
+        let canMoveX = true;
+        let canMoveY = true;
+
+        if (collisionMatrix) {
+            let rows = collisionMatrix.length;
+            let cols = collisionMatrix[0].length;
+
+            // 獨立測試 X 方向會不會撞牆
+            let mapX = Math.floor(testX);
+            let mapY = Math.floor(walkY); // 測試 X 時，Y 先假裝不動
+            if (mapY >= 0 && mapY < rows && mapX >= 0 && mapX < cols) {
+                if (collisionMatrix[mapY][mapX] === 1) canMoveX = false;
+            } else {
+                canMoveX = false; // 超出地圖邊界也算撞牆
+            }
+
+            // 獨立測試 Y 方向會不會撞牆
+            mapX = Math.floor(walkX); // 測試 Y 時，X 先假裝不動
+            mapY = Math.floor(testY);
+            if (mapY >= 0 && mapY < rows && mapX >= 0 && mapX < cols) {
+                if (collisionMatrix[mapY][mapX] === 1) canMoveY = false;
+            } else {
+                canMoveY = false;
+            }
+        }
+
+        // 如果走進死角 (X跟Y都撞牆)，就直接停止這一步剩下的位移
+        if (!canMoveX && !canMoveY) {
+            console.log("撞到死角了！");
+            break; 
+        }
+
+        // 🌟 完美的沿牆滑行邏輯：哪裡沒擋住就往哪裡滑
+        if (canMoveX) walkX = testX;
+        if (canMoveY) walkY = testY;
+    }
+
+    // 將微步測試後的最終安全座標，正式更新給人物
+    myPosition.x = walkX;
+    myPosition.y = walkY;
     
     updateDotUI(myUserId, myPosition.x, myPosition.y, myColor);
-    syncPosition(); // 呼叫 socket_log.js 內的同步函式
+    syncPosition();
 }
 
 // --- 地圖與 UI 渲染 ---
