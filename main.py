@@ -68,7 +68,9 @@ def safe_imread(image_path, flags=cv2.IMREAD_COLOR):
 def process_map_background(room_id: str, image_path: Path):
     try:
         # 更新狀態為處理中，讓前端顯示「AI 視覺解析中...」
-        ROOMS[room_id] = {"status": "processing", "image_url": None, "room_data": None}
+        ROOMS[room_id]["status"] = "processing"
+        ROOMS[room_id]["image_url"] = None
+        ROOMS[room_id]["room_data"] = None
         
         # 為這個房間建立專屬的輸出資料夾
         output_folder = UPLOAD_DIR / room_id
