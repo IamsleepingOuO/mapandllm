@@ -4,6 +4,7 @@
 
 let currentRoomId = null, currentInviteCode = null, currentServerImageUrl = null;
 let pollInterval = null, isMapReady = false;
+let collisionMatrix = null;
 
 const myUserId = 'user_' + Math.random().toString(36).substr(2, 6);
 const myColor = Math.random() > 0.5 ? '#ef4444' : '#3b82f6';
@@ -119,6 +120,10 @@ function startPolling() {
         if (data.status === 'ready') {
             document.getElementById('loading-overlay').classList.add('hidden');
             isMapReady = true;
+
+            if (typeof loadCollisionMap === 'function' && !collisionMatrix) {
+                loadCollisionMap(currentRoomId);
+            }
         } else if (data.status === 'processing') {
             document.getElementById('loading-overlay').classList.remove('hidden');
         }
@@ -173,4 +178,20 @@ async function syncPosition() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_id: myUserId, x: myPosition.x, y: myPosition.y, color: myColor })
     });
+}
+async function loadCollisionMap(roomId) {
+    try {
+        const response = await fetch(`/uploads/${roomId}/_0526_6.csv`);
+        const csvText = await response.text();
+        
+        // 過濾掉空行、空白符號，並強制轉成整數
+        collisionMatrix = csvText.trim().split('\n').map(row => {
+            return row.split(',')
+                      .filter(val => val.trim() !== "") // 濾掉結尾多餘的逗號
+                      .map(val => parseInt(val.trim(), 10)); // 確保絕對是數字
+        });
+        console.log(`碰撞矩陣載入完成！尺寸: ${collisionMatrix[0].length} x ${collisionMatrix.length}`);
+    } catch (error) {
+        console.error("無法載入碰撞矩陣", error);
+    }
 }

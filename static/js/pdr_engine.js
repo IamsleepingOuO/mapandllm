@@ -68,7 +68,7 @@ function startSensors() {
     window.addEventListener('deviceorientation', (e) => {
         let raw = e.webkitCompassHeading || (360 - (e.alpha || 0));
         
-        // 🌟 簡單的一階低通濾波（權重 0.2），讓角度不會因為手震瞬間暴跳
+        // 簡單的一階低通濾波（權重 0.2），讓角度不會因為手震瞬間暴跳
         if (currentRawHeading === 0) {
             currentRawHeading = raw; // 第一次直接賦值
         } else {
@@ -108,11 +108,66 @@ function handleStepDetected() {
     let relativeHeading = currentRawHeading - headingOffset;
     let rad = relativeHeading * (Math.PI / 180);
     
-    myPosition.x += Math.sin(rad) * customStepPx;
-    myPosition.y -= Math.cos(rad) * customStepPx;
+    // 計算出這個步伐的 X、Y 總分量
+    let totalDx = Math.sin(rad) * customStepPx;
+    let totalDy = -Math.cos(rad) * customStepPx;
+    
+    // 將一步切為數個2像素
+    // 牆體為3像素，因此不會造成穿牆
+    let maxSubSteps = Math.ceil(customStepPx / 2); 
+    let stepDx = totalDx / maxSubSteps;
+    let stepDy = totalDy / maxSubSteps;
+
+    let walkX = myPosition.x;
+    let walkY = myPosition.y;
+
+    for (let i = 0; i < maxSubSteps; i++) {
+        let testX = walkX + stepDx;
+        let testY = walkY + stepDy;
+        
+        let canMoveX = true;
+        let canMoveY = true;
+
+        if (collisionMatrix) {
+            let rows = collisionMatrix.length;
+            let cols = collisionMatrix[0].length;
+
+            // 獨立測試 X 方向會不會撞牆
+            let mapX = Math.floor(testX);
+            let mapY = Math.floor(walkY); // 測試 X 時，Y 先假裝不動
+            if (mapY >= 0 && mapY < rows && mapX >= 0 && mapX < cols) {
+                if (collisionMatrix[mapY][mapX] === 1) canMoveX = false;
+            } else {
+                canMoveX = false; // 超出地圖邊界也算撞牆
+            }
+
+            // 獨立測試 Y 方向會不會撞牆
+            mapX = Math.floor(walkX); // 測試 Y 時，X 先假裝不動
+            mapY = Math.floor(testY);
+            if (mapY >= 0 && mapY < rows && mapX >= 0 && mapX < cols) {
+                if (collisionMatrix[mapY][mapX] === 1) canMoveY = false;
+            } else {
+                canMoveY = false;
+            }
+        }
+
+        // 如果走進死角 (X跟Y都撞牆)，就直接停止這一步剩下的位移
+        if (!canMoveX && !canMoveY) {
+            console.log("撞到死角");
+            break; 
+        }
+
+        // 沿牆滑行邏輯：
+        if (canMoveX) walkX = testX;
+        if (canMoveY) walkY = testY;
+    }
+
+    // 將微步測試後的最終安全座標，正式更新給人物
+    myPosition.x = walkX;
+    myPosition.y = walkY;
     
     updateDotUI(myUserId, myPosition.x, myPosition.y, myColor);
-    syncPosition(); // 呼叫 socket_log.js 內的同步函式
+    syncPosition();
 }
 
 // --- 地圖與 UI 渲染 ---
