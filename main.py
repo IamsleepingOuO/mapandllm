@@ -71,6 +71,14 @@ def process_map_background(room_id: str, image_path: Path):
         output_folder.mkdir(parents=True, exist_ok=True)
         
         print(f"開始處理房間 {room_id} 的地圖...")
+
+        print("[系統] 正在執行 YOLO 物件偵測 (全域預處理)...")
+        yolo_model_global = YOLO(YOLO_MODEL_PATH)
+        yolo_results = yolo_model_global.predict(source=str(image_path), conf=0.15, imgsz=1024, verbose=False)[0]
+        yolo_boxes_data = []
+        for obj in yolo_results.boxes:
+            x1, y1, x2, y2 = map(int, obj.xyxy[0])
+            yolo_boxes_data.append((x1, y1, x2, y2))
         
         # 1. 執行 OCR
         ocr_results = get_ocr_data(str(image_path))
@@ -369,7 +377,7 @@ def get_user_location(user_input, room_data):
 2. **分析線索**：透過對比所有房間的names與objects找到關聯。同時可透過shape屬性確認形容詞描述的大小寬窄。
 3. **語意比對**：使用者可能透過情境或別稱以及簡稱來描述地點，請推理出最可能的房間。
 4. **文字修正**: 若遇到疑似錯別字，請自行判斷正確詞義。
-5. **簡稱處理**: 如遇到使用者使用英文字母簡稱的情況，請優先尋找字首開頭為相對應字母的地點的地點(如CK為CALVIN KLEIN、NB為New Balance)，其次尋找名稱內含有相對應字母的地點。
+5. **簡稱處理**: 如遇到使用者使用英文字母簡稱的情況，請嚴格尋找字首開頭為相對應字母的地點的地點(如CK為CALVIN KLEIN、NB為New Balance)
 
 使用者現在說："{user_input}"
 
