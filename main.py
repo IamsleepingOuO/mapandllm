@@ -18,17 +18,15 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import ollama
+from ultralytics import YOLO
 from map_processor import get_ocr_data, analyze_colors_and_corridor, extract_walls_with_repair, RoomSegmenter
 
 # ==========================================
 # ⚙️ 系統設定與全域變數
 # ==========================================
-# 強制優化 PyTorch 記憶體碎片管理
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-# ⚠️ 請確保此 YOLO 模型路徑正確
 YOLO_MODEL_PATH = 'train6/weights/best.pt'
-# 使用的 LLM 模型 (依照你程式碼中的設定，若無此模型可改回 'llama3')
 LLM_MODEL = 'TwinkleAI/gemma-3-4B-T1-it'
 
 app = FastAPI()
@@ -60,36 +58,66 @@ def cleanup_expired_rooms():
         print(f"🧹 房間 {code} 已回收")
 
 # ==========================================
-# 🧠 AI 視覺處理模組 (來自 0526.py 升級版)
+# 🧠 AI 視覺處理模組 (0616 終極管線版)
 # ==========================================
-def safe_imread(image_path, flags=cv2.IMREAD_COLOR):
-    return cv2.imread(str(image_path), flags)
-
 def process_map_background(room_id: str, image_path: Path):
     try:
-        # 更新狀態為處理中，讓前端顯示「AI 視覺解析中...」
         ROOMS[room_id]["status"] = "processing"
         ROOMS[room_id]["image_url"] = None
         ROOMS[room_id]["room_data"] = None
         
-        # 為這個房間建立專屬的輸出資料夾
         output_folder = UPLOAD_DIR / room_id
         output_folder.mkdir(parents=True, exist_ok=True)
         
         print(f"🚀 開始處理房間 {room_id} 的地圖...")
+
+        # --- [新增] 提前執行 YOLO 獲取圖示橡皮擦邊界框 ---
+        print("[系統] 正在執行 YOLO 物件偵測 (全域預處理)...")
+        yolo_model_global = YOLO(YOLO_MODEL_PATH)
+        yolo_results = yolo_model_global.predict(source=str(image_path), conf=0.15, imgsz=1024, verbose=False)[0]
+        yolo_boxes_data = []
+        for obj in yolo_results.boxes:
+            x1, y1, x2, y2 = map(int, obj.xyxy[0])
+            yolo_boxes_data.append((x1, y1, x2, y2))
         
         # 1. 執行 OCR
         ocr_results = get_ocr_data(str(image_path))
 
-        # 2. 獲取走道遮罩 (這裡對應你 __main__ 裡設定的 k=6)
-        corridor_mask_k = analyze_colors_and_corridor(str(image_path), ocr_results, k=6)
+        # 2. 獲取走道遮罩與背景遮罩 (注意：改為接收兩個回傳值)
+        corridor_mask_k, bg_mask = analyze_colors_and_corridor(str(image_path), ocr_results, k=6)
 
-        # 3. 提取精密牆體與幾何修補
-        repaired_wall_matrix = extract_walls_with_repair(str(image_path), output_folder, ocr_results)
+        # 3. 提取精密牆體與幾何修補 (傳入 bg_mask 保護外牆，以及 yolo_boxes 橡皮擦)
+        repaired_wall_matrix = extract_walls_with_repair(
+            str(image_path), 
+            output_folder, 
+            ocr_results, 
+            bg_mask=bg_mask, 
+            yolo_boxes=yolo_boxes_data
+        )
         
         # 4. 進行空間分配與屬性標記
         if repaired_wall_matrix is not None:
-            segmenter = RoomSegmenter(output_folder, YOLO_MODEL_PATH)
+            
+            # 🌟 [新增] 將嚴謹的背景實體化過濾機制放進主執行緒
+            if bg_mask is not None:
+                print("[系統] 正在將背景區域實體化為不可行走之牆體 (啟動嚴謹大面積過濾)...")
+                H, W = repaired_wall_matrix.shape
+                
+                if bg_mask.shape != (H, W):
+                    bg_mask = cv2.resize(bg_mask, (W, H), interpolation=cv2.INTER_NEAREST)
+                
+                num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(bg_mask, connectivity=8)
+                clean_bg_mask = np.zeros((H, W), dtype=np.uint8)
+                min_bg_area = (H * W) * 0.01 
+                
+                for i in range(1, num_labels):
+                    if stats[i, cv2.CC_STAT_AREA] > min_bg_area:
+                        clean_bg_mask[labels == i] = 255
+                        
+                repaired_wall_matrix[clean_bg_mask == 255] = 1
+
+            print("[系統] 啟動空間分割器 (調整 door_ratio 防止狹窄空間斷裂)...")
+            segmenter = RoomSegmenter(output_folder, YOLO_MODEL_PATH, door_ratio=0.01)
             segmenter.process(
                 str(image_path), 
                 wall_matrix=repaired_wall_matrix,
@@ -97,18 +125,20 @@ def process_map_background(room_id: str, image_path: Path):
                 ocr_data=ocr_results
             )
             
-            # 讀取剛剛產生的 JSON 資料
-            json_file_path = output_folder / "room_data_0526_6.json"
-            csv_file_path = output_folder / "_0526_6.csv"
+            # ==========================================
+            # 讀取剛剛產生的資料 (使用通用標準檔名)
+            # ==========================================
+            json_file_path = output_folder / "room_data.json"
+            csv_file_path = output_folder / "map_matrix.csv"
+            
             if json_file_path.exists():
                 with open(json_file_path, 'r', encoding='utf-8') as f:
                     room_data = json.load(f)
             else:
                 room_data = {}
 
-            # 🌟 更新房間狀態：處理完成，通知前端可以拿圖了！
+            # 🌟 更新房間狀態：處理完成
             ROOMS[room_id]["status"] = "ready"
-            # 指向你模組產生的那張 debug_0526_6.jpg
             ROOMS[room_id]["image_url"] = f"/uploads/{image_path.name}" 
             ROOMS[room_id]["room_data"] = room_data
             ROOMS[room_id]["json_path"] = str(json_file_path)
@@ -127,20 +157,18 @@ async def upload_map(
     if room_id not in ROOMS:
         return {"error": "房間不存在"}
 
-    # 儲存使用者上傳的原始圖片
     file_ext = file.filename.split('.')[-1]
     save_path = UPLOAD_DIR / f"{room_id}_raw.{file_ext}"
     
     with open(save_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    # 將耗時的影像處理丟入背景執行，讓前端立刻收到回應
     background_tasks.add_task(process_map_background, room_id, save_path)
     
     return {"message": "地圖上傳成功，開始背景解析"}
 
 # ==========================================
-# 📍 A* 導航模組與 LLM 生成 (來自 0427_llm1.py)
+# 📍 A* 導航模組與 LLM 生成
 # ==========================================
 class IndoorNavigator:
     def __init__(self, map_csv_path, room_json_path, room_id):
@@ -180,13 +208,12 @@ class IndoorNavigator:
 
     def a_star_path(self, start_pt, end_pt):
         def heuristic(a, b): return abs(a[0] - b[0]) + abs(a[1] - b[1])
-        # 狀態紀錄擴充：座標 (x, y) 加上 抵達該點的方向 (dx, dy)
         start_state = (start_pt[0], start_pt[1], 0, 0)
         open_set = []
         heapq.heappush(open_set, (0, start_state))
         came_from = {}
         g_score = {start_state: 0}
-        TURN_PENALTY = 0.5  # 轉彎懲罰值，保證距離最短的前提下轉彎最少
+        TURN_PENALTY = 0.5 
         
         while open_set:
             _, current_state = heapq.heappop(open_set)
@@ -207,7 +234,7 @@ class IndoorNavigator:
                     if self.map_matrix[ny, nx] in self.portal_ids or heuristic((nx, ny), end_pt) < 5:
                         move_cost = 1
                         if (cdx, cdy) != (0, 0) and (ndx, ndy) != (cdx, cdy):
-                            move_cost += TURN_PENALTY # 判斷轉彎並加上懲罰
+                            move_cost += TURN_PENALTY 
                             
                         tentative_g = g_score[current_state] + move_cost
                         neighbor_state = (nx, ny, ndx, ndy)
@@ -327,7 +354,6 @@ class IndoorNavigator:
 """
         response = ollama.generate(model=LLM_MODEL, prompt=prompt)
         
-        # 保留強制的物理截斷機制，斬掉廢話與 <think>
         import re
         clean_reply = re.sub(r'<think>.*?</think>', '', response['response'], flags=re.DOTALL).strip()
         if "請以面向" in clean_reply:
@@ -337,7 +363,6 @@ class IndoorNavigator:
         return clean_reply, debug_url, path_coords
 
 def get_user_location(user_input, room_data):
-    # 【保留修正】開放所有 ID，允許使用者從「第一噴水池廣場」出發
     valid_room_ids = list(room_data.keys()) 
 
     prompt = f"""
@@ -394,6 +419,7 @@ async def create_room():
     }
     CODE_TO_UUID[invite_code] = room_uuid
     return {"room_id": room_uuid, "invite_code": invite_code}
+
 class JoinRequest(BaseModel):
     code_or_id: str
 
@@ -428,18 +454,16 @@ async def chat_with_llama(req_data: ChatRequest):
     with open(room["json_path"], 'r', encoding='utf-8') as f:
         room_data = json.load(f)
 
-    # 呼叫我們剛剛整合的 LLM 位置分析函數
     loc = get_user_location(req_data.message, room_data)
     start_id = loc.get("current_room_id")
     end_id = loc.get("destination_id")
-    start_name = loc.get("current_room_name") # 🌟 新增抓取名稱
-    end_name = loc.get("destination_name")    # 🌟 新增抓取名稱
+    start_name = loc.get("current_room_name") 
+    end_name = loc.get("destination_name")    
     
     if not start_id: return {"reply": "🤔 抱歉，我不太確定你的「現在位置」在哪裡，可以再描述得更明確一點嗎？"}
     if not end_id: return {"reply": "🤔 抱歉，我不太確定你要去的「目的地」是哪裡，可以換個說法嗎？"}
 
     nav = IndoorNavigator(room["csv_path"], room["json_path"], req_data.room_id)
-    # 🌟 傳入 start_name 與 end_name 給導航器
     final_text, debug_url, path_coords = nav.generate_llm_guidance(
         int(start_id), int(end_id),
         user_start_name=start_name,
@@ -464,7 +488,6 @@ class PositionUpdate(BaseModel):
 @app.post("/update_position/{room_id}")
 async def update_position(room_id: str, pos: PositionUpdate):
     if room_id in ROOMS:
-        # 限制最多兩人：如果字典裡沒有這個人，且人數已達2人，就拒絕更新
         if pos.user_id not in ROOMS[room_id]["users"] and len(ROOMS[room_id]["users"]) >= 2:
             return {"status": "full"}
             

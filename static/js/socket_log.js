@@ -181,7 +181,7 @@ async function syncPosition() {
 }
 async function loadCollisionMap(roomId) {
     try {
-        const response = await fetch(`/uploads/${roomId}/_0526_6.csv`);
+        const response = await fetch(`/uploads/${roomId}/map_matrix.csv`);
         const csvText = await response.text();
         
         // 過濾掉空行、空白符號，並強制轉成整數
