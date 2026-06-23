@@ -27,7 +27,8 @@ from map_processor import get_ocr_data, analyze_colors_and_corridor, extract_wal
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 YOLO_MODEL_PATH = 'train6/weights/best.pt'
-LLM_MODEL = 'TwinkleAI/gemma-3-4B-T1-it'
+# 使用的 LLM 模型 (依照你程式碼中的設定，若無此模型可改回 'llama3')
+LLM_MODEL = 'gemma4'
 
 app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -69,16 +70,7 @@ def process_map_background(room_id: str, image_path: Path):
         output_folder = UPLOAD_DIR / room_id
         output_folder.mkdir(parents=True, exist_ok=True)
         
-        print(f"🚀 開始處理房間 {room_id} 的地圖...")
-
-        # --- [新增] 提前執行 YOLO 獲取圖示橡皮擦邊界框 ---
-        print("[系統] 正在執行 YOLO 物件偵測 (全域預處理)...")
-        yolo_model_global = YOLO(YOLO_MODEL_PATH)
-        yolo_results = yolo_model_global.predict(source=str(image_path), conf=0.15, imgsz=1024, verbose=False)[0]
-        yolo_boxes_data = []
-        for obj in yolo_results.boxes:
-            x1, y1, x2, y2 = map(int, obj.xyxy[0])
-            yolo_boxes_data.append((x1, y1, x2, y2))
+        print(f"開始處理房間 {room_id} 的地圖...")
         
         # 1. 執行 OCR
         ocr_results = get_ocr_data(str(image_path))
@@ -145,7 +137,7 @@ def process_map_background(room_id: str, image_path: Path):
             ROOMS[room_id]["csv_path"] = str(csv_file_path)
 
     except Exception as e:
-        print(f"❌ 地圖處理失敗: {e}")
+        print(f"地圖處理失敗: {e}")
         ROOMS[room_id]["status"] = "error"
 
 @app.post("/upload")
@@ -351,6 +343,7 @@ class IndoorNavigator:
 4. 依照紀錄順序明確指示轉向（向左或向右）。
 5. 結尾恭喜使用者抵達目的地 {end_name}。
 6. 寫成一段流暢連續的對話段落，不要輸出任何標題或條列符號。
+7. 請以繁體中文回答
 """
         response = ollama.generate(model=LLM_MODEL, prompt=prompt)
         
@@ -374,8 +367,9 @@ def get_user_location(user_input, room_data):
 【核心限制與推理規則】
 1. **起點與終點限制 (極重要)**：合法區域 ID 清單：{valid_room_ids}。使用者所在的起點與終點可以是實體房間，也可以是廣場或走道（portal）。
 2. **分析線索**：透過對比所有房間的names與objects找到關聯。同時可透過shape屬性確認形容詞描述的大小寬窄。
-3. **語意比對**：使用者可能透過情境或別稱來描述地點，請推理出最可能的房間。
+3. **語意比對**：使用者可能透過情境或別稱以及簡稱來描述地點，請推理出最可能的房間。
 4. **文字修正**: 若遇到疑似錯別字，請自行判斷正確詞義。
+5. **簡稱處理**: 如遇到使用者使用英文字母簡稱的情況，請優先尋找字首開頭為相對應字母的地點的地點(如CK為CALVIN KLEIN、NB為New Balance)，其次尋找名稱內含有相對應字母的地點。
 
 使用者現在說："{user_input}"
 
