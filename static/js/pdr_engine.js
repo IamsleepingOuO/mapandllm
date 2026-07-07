@@ -171,22 +171,33 @@ function handleStepDetected() {
 }
 
 // --- 地圖與 UI 渲染 ---
-function updateDotUI(uid, naturalX, naturalY, color) {
-    const wrapper = document.getElementById('map-wrapper');
-    const img = document.getElementById('map-image');
-    if (!img.naturalWidth) return; 
-
-    let dot = document.getElementById('dot-' + uid);
+function updateDotUI(userId, x, y, color) {
+    const overlay = document.getElementById('dots-overlay');
+    
+    // 尋找是否已經有這個使用者的點
+    let dot = document.getElementById(`dot-${userId}`);
+    
     if (!dot) {
         dot = document.createElement('div');
-        dot.id = 'dot-' + uid;
-        dot.className = 'user-dot';
+        dot.id = `dot-${userId}`;
+        // 畫出一個紅點 (使用 Tailwind classes 或直接寫 style)
+        dot.className = 'absolute rounded-full w-4 h-4 transform -translate-x-1/2 -translate-y-1/2 shadow-md transition-all duration-300';
         dot.style.backgroundColor = color;
-        wrapper.appendChild(dot);
+        overlay.appendChild(dot);
     }
+
+    // ⚠️ 關鍵：假設你的後端傳來的 x, y 是圖片原始的像素座標
+    // 你需要把它轉換成百分比 (%)，這樣地圖縮放時點才會在正確位置
+    // 假設 imageOriginalWidth 和 imageOriginalHeight 是地圖的原始寬高
+    const mapImg = document.getElementById('map-image');
     
-    dot.style.left = (naturalX / img.naturalWidth * 100) + '%';
-    dot.style.top = (naturalY / img.naturalHeight * 100) + '%';
+    // 如果後端傳來的已經是 0~1 的比例，就直接乘 100
+    // 如果是真實 pixel，就除以圖片寬高：(x / mapImg.naturalWidth) * 100
+    const percentX = (x / mapImg.naturalWidth) * 100;
+    const percentY = (y / mapImg.naturalHeight) * 100;
+
+    dot.style.left = `${percentX}%`;
+    dot.style.top = `${percentY}%`;
 }
 
 function drawPathOnMap(coords) {

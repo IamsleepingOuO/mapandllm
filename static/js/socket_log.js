@@ -5,10 +5,11 @@
 let currentRoomId = null, currentInviteCode = null, currentServerImageUrl = null;
 let pollInterval = null, isMapReady = false;
 let collisionMatrix = null;
+let panzoomInstance = null; // 新增 Panzoom 實例變數
 
 const myUserId = 'user_' + Math.random().toString(36).substr(2, 6);
 const myColor = Math.random() > 0.5 ? '#ef4444' : '#3b82f6';
-let myPosition = null; // 共享給 PDR 引擎更新
+let myPosition = null; 
 
 window.onload = () => {
     const urlParams = new URLSearchParams(window.location.search);
@@ -38,7 +39,79 @@ window.onload = () => {
     });
 };
 
-// --- 房間與訊息 ---
+// --- 地圖載入與 Panzoom 啟動 ---
+document.getElementById('map-image').onload = function() {
+    const img = this;
+    const content = document.getElementById('panzoom-content');
+    const pathSvg = document.getElementById('path-svg');
+    const viewport = document.getElementById('map-wrapper');
+
+    // 1. 強制畫布大小 = 圖片真實像素 (最重要的一步！)
+    content.style.width = img.naturalWidth + 'px';
+    content.style.height = img.naturalHeight + 'px';
+    
+    // 2. SVG viewBox 對齊真實尺寸
+    pathSvg.setAttribute('viewBox', `0 0 ${img.naturalWidth} ${img.naturalHeight}`);
+
+    // 3. 確保外層顯示出來
+    viewport.classList.remove('hidden');
+
+    // 4. 重置並啟動 Panzoom
+    if (panzoomInstance) panzoomInstance.destroy();
+
+    panzoomInstance = Panzoom(content, {
+        maxScale: 5,
+        minScale: 0.05, 
+        step: 0.2,
+        contain: 'outside'
+    });
+
+    viewport.addEventListener('wheel', panzoomInstance.zoomWithWheel);
+
+    // 5. 計算完美初始縮放比例，讓大圖片自動塞進小螢幕
+    const scaleX = viewport.clientWidth / img.naturalWidth;
+    const scaleY = viewport.clientHeight / img.naturalHeight;
+    const startScale = Math.min(scaleX, scaleY) * 0.95; 
+
+    panzoomInstance.zoom(startScale, { animate: false });
+    setTimeout(() => panzoomInstance.pan(0, 0, { animate: false }), 10);
+};
+
+// --- 人工點擊定位 ---
+document.getElementById('map-image').addEventListener('click', function(e) {
+    // 畫布已是真實大小，這裡的 offsetX/Y 絕對精準，不受縮放影響
+    const realX = e.offsetX;
+    const realY = e.offsetY;
+    
+    myPosition = { x: realX, y: realY };
+    updateDotUI(myUserId, realX, realY, myColor);
+    syncPosition();
+    
+    // 若有與 PDR 引擎串接
+    if (typeof autoSetStartPoint === 'function') {
+        autoSetStartPoint(realX, realY);
+    }
+});
+
+// --- 紅點更新 (改為像素定位) ---
+function updateDotUI(userId, x, y, color) {
+    const overlay = document.getElementById('dots-overlay');
+    let dot = document.getElementById(`dot-${userId}`);
+    
+    if (!dot) {
+        dot = document.createElement('div');
+        dot.id = `dot-${userId}`;
+        dot.className = 'absolute rounded-full w-4 h-4 transform -translate-x-1/2 -translate-y-1/2 shadow-md transition-all duration-300 z-50';
+        dot.style.backgroundColor = color;
+        overlay.appendChild(dot);
+    }
+
+    // 已經不需要算百分比，直接套用後端或點擊傳來的真實座標
+    dot.style.left = `${x}px`;
+    dot.style.top = `${y}px`;
+}
+
+// --- 房間與訊息 API (保留原邏輯) ---
 async function createRoom() {
     const res = await fetch('/create_room', { method: 'POST' });
     const data = await res.json();
@@ -103,7 +176,9 @@ async function sendMessage() {
     const data = await res.json();
     appendMessage('Agent', data.reply, false);
     if (data.path_coords && data.path_coords.length > 0) {
-        drawPathOnMap(data.path_coords); // 呼叫 pdr_engine.js 的函式
+        if (typeof drawPathOnMap === 'function') {
+            drawPathOnMap(data.path_coords); 
+        }
         myPosition = { x: data.path_coords[0][0], y: data.path_coords[0][1] };
         updateDotUI(myUserId, myPosition.x, myPosition.y, myColor);
         syncPosition();
@@ -130,8 +205,8 @@ function startPolling() {
         if (data.image_url && data.image_url !== currentServerImageUrl) {
             currentServerImageUrl = data.image_url;
             document.getElementById('upload-ui').classList.add('hidden');
+            // 設定 src 會觸發上面的 onload 事件來自動啟動 Panzoom
             document.getElementById('map-image').src = currentServerImageUrl;
-            document.getElementById('map-wrapper').classList.remove('hidden');
         }
         if (data.users) {
             for (const [uid, userObj] of Object.entries(data.users)) {
@@ -151,9 +226,10 @@ function appendMessage(sender, text, isUser) {
 
 async function loadMap(event) {
     const file = event.target.files[0];
+    // 先在本機顯示
     document.getElementById('map-image').src = URL.createObjectURL(file);
     document.getElementById('upload-ui').classList.add('hidden');
-    document.getElementById('map-wrapper').classList.remove('hidden');
+    
     const formData = new FormData();
     formData.append('file', file);
     formData.append('room_id', currentRoomId);
@@ -179,16 +255,15 @@ async function syncPosition() {
         body: JSON.stringify({ user_id: myUserId, x: myPosition.x, y: myPosition.y, color: myColor })
     });
 }
+
 async function loadCollisionMap(roomId) {
     try {
         const response = await fetch(`/uploads/${roomId}/map_matrix.csv`);
         const csvText = await response.text();
-        
-        // 過濾掉空行、空白符號，並強制轉成整數
         collisionMatrix = csvText.trim().split('\n').map(row => {
             return row.split(',')
-                      .filter(val => val.trim() !== "") // 濾掉結尾多餘的逗號
-                      .map(val => parseInt(val.trim(), 10)); // 確保絕對是數字
+                      .filter(val => val.trim() !== "") 
+                      .map(val => parseInt(val.trim(), 10)); 
         });
         console.log(`碰撞矩陣載入完成！尺寸: ${collisionMatrix[0].length} x ${collisionMatrix.length}`);
     } catch (error) {

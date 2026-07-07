@@ -7,6 +7,7 @@
     <title>室內導航系統</title>
     
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/@panzoom/panzoom@4.5.1/dist/panzoom.min.js"></script>
     
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
@@ -19,9 +20,12 @@
             <input type="file" id="map-input" accept="image/*" class="hidden" onchange="loadMap(event)">
         </label>
         
-        <div id="map-wrapper" class="hidden relative max-w-full max-h-full">
-            <img id="map-image" class="max-w-full max-h-full rounded-crosshair select-none block" alt="室內地圖">
-            <svg id="path-svg" class="absolute inset-0 w-full h-full pointer-events-none z-10 transition-opacity duration-500 opacity-0"></svg>
+        <div id="map-wrapper" class="hidden relative w-full h-[60vh] md:h-[80vh] overflow-hidden bg-gray-900 cursor-grab active:cursor-grabbing">
+            <div id="panzoom-content" class="relative origin-center">
+                <img id="map-image" class="block w-full h-full" alt="室內地圖">
+                <svg id="path-svg" class="absolute inset-0 w-full h-full pointer-events-none z-10 opacity-0 transition-opacity duration-500"></svg>
+                <div id="dots-overlay" class="absolute inset-0 w-full h-full pointer-events-none z-20"></div>
+            </div>
         </div>
         
         <div id="loading-overlay" class="hidden absolute inset-0 bg-gray-900 bg-opacity-80 flex flex-col items-center justify-center z-30 text-white backdrop-blur-sm transition-all duration-300">
