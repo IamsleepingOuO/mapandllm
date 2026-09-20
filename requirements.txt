@@ -1,17 +1,11 @@
-# --- Web 伺服器與 API 架構 ---
-fastapi
-uvicorn[standard]
-python-multipart
-pydantic
-
-# --- 影像處理與資料科學 ---
-# 註：如果在沒有 GUI (桌面環境) 的純文字 Linux 伺服器上，
-# 建議把 opencv-python 改成 opencv-python-headless 以避免缺少 .so 函式庫錯誤
-opencv-python
-numpy
-pandas
-
-# --- AI 與深度學習模組 ---
-easyocr
-ultralytics
-ollama
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+numpy>=1.24
+pandas>=2.0
+opencv-contrib-python>=4.8
+easyocr>=1.7
+torch>=2.1
+ultralytics>=8.2
+networkx>=3.1
+ollama>=0.3

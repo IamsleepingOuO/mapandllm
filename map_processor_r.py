@@ -4058,8 +4058,6 @@ def plan_staged_route(graph_payload, start_node, end_node, confirmed_transfers=(
         'contains_unverified_transfer':any(s['type']=='find_entrance' for s in stages)}
 
 
-PROCESSOR_VERSION = "V11_envelope_before_components_staged_navigation"
-
 def _build_map_interior_mask(wall_matrix, bg_mask=None):
     """Select subdivided building shells, not every large printed rectangle.
 
@@ -4510,44 +4508,18 @@ class RoomSegmenter:
                 json.dumps(partition_guard_report, ensure_ascii=False, indent=2), encoding="utf-8")
         else:
             closed = cv2.morphologyEx(wall_matrix, cv2.MORPH_CLOSE, kernel)
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats((1 - closed).astype(np.uint8), connectivity=8)
 
         map_interior_mask, map_interior_report = _build_map_interior_mask(
             structural_wall_matrix if structural_wall_matrix is not None else wall_matrix, bg_mask=bg_mask
         )
-        safe_imwrite(str(self.output_dir / "debug_map_interior_before_v11.png"), map_interior_mask)
-        palette_details = corridor_color_details
-        palette_source = "pipeline"
-        if not palette_details or palette_details.get("labels_2d") is None:
-            color_result = analyze_colors_and_corridor(image_path, ocr_data or [], k=6, return_details=True)
-            if color_result is not None:
-                _, bg_mask, palette_details = color_result
-                palette_source = "recomputed_from_source"
-        elif np.asarray(palette_details["labels_2d"]).shape != (h,w):
-            palette_details = dict(palette_details)
-            palette_details["labels_2d"] = cv2.resize(
-                np.asarray(palette_details["labels_2d"],np.uint8),(w,h),interpolation=cv2.INTER_NEAREST)
-            palette_source = "aligned_to_wall_matrix"
-        if bg_mask is not None and bg_mask.shape != (h,w):
-            bg_mask = cv2.resize(bg_mask,(w,h),interpolation=cv2.INTER_NEAREST)
-        corridor_color_details = palette_details
         map_interior_mask, palette_report = _restore_supported_floor_v10(
-            map_interior_mask, palette_details, bg_mask)
-        palette_report["source"] = palette_source
+            map_interior_mask, corridor_color_details, bg_mask)
         map_interior_report["palette_envelope_check"] = palette_report
         safe_imwrite(
             str(self.output_dir / "debug_map_interior_mask_v2.jpg"),
             map_interior_mask,
         )
-        # Seal the validated building exterior BEFORE connected-component filtering.
-        # Otherwise a shop leaking through an incomplete facade is discarded as
-        # a border-touching component even when its floor is inside the envelope.
-        closed = closed.copy()
-        if palette_report.get("restored_pixels", 0) > 0:
-            closed[map_interior_mask == 0] = 1
-        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
-            (1 - closed).astype(np.uint8), connectivity=8)
-        map_interior_report["processor_version"] = PROCESSOR_VERSION
-        print(f"[INTERIOR V11] restored={palette_report.get('restored_pixels',0)}; components={num_labels-1}")
         rejected_outside = []
 
         res_matrix = np.ones((h, w), dtype=np.int32)
@@ -11214,7 +11186,7 @@ def build_navigation_data(image_path, res_matrix, metrics_list, id_labels, graph
 
     return {
         "schema_version": PIPELINE_SCHEMA_VERSION,
-        "generator": PROCESSOR_VERSION,
+        "generator": "0904 room-partition V3 guarded ensemble + FAST V9 owner-locked attachment + V8 rectilinear recovery",
         "map": {
             "image_width": int(width),
             "image_height": int(height),
