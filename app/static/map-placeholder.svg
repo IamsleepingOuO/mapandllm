@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+  <title id="title">商場地圖預留圖</title>
+  <desc id="desc">用於介面測試的商場樓層地圖佔位圖，請替換成實際地圖圖片。</desc>
+  <rect width="1200" height="760" fill="#eceae5"/>
+  <g fill="#d8d4cc" stroke="#b9b4aa" stroke-width="4">
+    <rect x="70" y="90" width="300" height="210" rx="18"/>
+    <rect x="830" y="90" width="300" height="210" rx="18"/>
+    <rect x="70" y="460" width="300" height="210" rx="18"/>
+    <rect x="830" y="460" width="300" height="210" rx="18"/>
+    <rect x="450" y="80" width="300" height="135" rx="18"/>
+    <rect x="450" y="545" width="300" height="135" rx="18"/>
+  </g>
+  <path d="M420 120h360M420 640h360M210 335h780M210 425h780" fill="none" stroke="#b7b2a8" stroke-width="32" stroke-linecap="round"/>
+  <ellipse cx="600" cy="380" rx="150" ry="105" fill="#d5e1d1" stroke="#a9b7a5" stroke-width="5"/>
+  <circle cx="600" cy="380" r="17" fill="#66635e"/>
+  <g font-family="system-ui, sans-serif" fill="#625f59" text-anchor="middle">
+    <text x="220" y="205" font-size="42">STORE A</text>
+    <text x="980" y="205" font-size="42">STORE B</text>
+    <text x="220" y="575" font-size="42">STORE C</text>
+    <text x="980" y="575" font-size="42">STORE D</text>
+    <text x="600" y="155" font-size="34">NORTH WING</text>
+    <text x="600" y="620" font-size="34">SOUTH WING</text>
+    <text x="600" y="392" font-size="32">YOU</text>
+    <text x="600" y="735" font-size="28">Replace this file with your mall floor map</text>
+  </g>
+</svg>

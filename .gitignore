@@ -20,3 +20,7 @@ map_output/
 # 作業系統產生的垃圾檔
 .DS_Store
 Thumbs.db
+.env
+saved/
+test-artifacts/
+.pytest_cache/

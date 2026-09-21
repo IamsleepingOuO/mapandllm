@@ -9,6 +9,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+import io
 import threading
 import time
 import uuid
@@ -17,12 +18,13 @@ from typing import Any
 
 import cv2
 import numpy as np
-import ollama
+import httpx
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from PIL import Image, ImageOps, UnidentifiedImageError
+from pydantic import BaseModel, Field
 
 
 # ==========================================
@@ -30,8 +32,23 @@ from pydantic import BaseModel
 # ==========================================
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/")
+
+class OllamaClient:
+    """Small HTTP client that keeps v2 independent from the Ollama Python SDK."""
+    def generate(self, **payload):
+        if "format" not in payload and "response_format" in payload:
+            payload["format"] = payload.pop("response_format")
+        response = httpx.post(OLLAMA_HOST + "/api/generate", json={**payload, "stream": False}, timeout=120)
+        response.raise_for_status()
+        return response.json()
+
+ollama = OllamaClient()
+
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploads"
+MAX_MAP_BYTES = 20 * 1024 * 1024
+MAX_MAP_PIXELS = 20_000_000
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 YOLO_MODEL_PATH = Path(os.environ.get("YOLO_MODEL_PATH", str(BASE_DIR / "train6/weights/best.pt")))
 LLM_MODEL = os.environ.get("LLM_MODEL", "gemma4:latest")
@@ -349,6 +366,7 @@ def process_map_background(room_id: str, image_path: Path) -> None:
         room = ROOMS[room_id]
         room.update({
             "status": "processing",
+            "pending_routes": {},
             "image_url": None,
             "navigation_path": None,
             "json_path": None,
@@ -420,15 +438,28 @@ async def upload_map(
 ):
     if room_id not in ROOMS:
         raise HTTPException(status_code=404, detail="房間不存在")
-
-    suffix = Path(file.filename or "map.png").suffix.lower()
-    if suffix not in {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"}:
-        raise HTTPException(status_code=400, detail="不支援的影像格式")
-
-    save_path = UPLOAD_DIR / f"{room_id}_raw{suffix}"
-    with open(save_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
+    if ROOMS[room_id].get("status") == "processing":
+        raise HTTPException(status_code=409, detail="此房間的地圖仍在解析中")
+    if not YOLO_MODEL_PATH.is_file():
+        raise HTTPException(status_code=503, detail="尚未設定地圖 YOLO 權重，請設定 YOLO_MODEL_PATH 後重新啟動。")
+    if file.content_type and not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=415, detail="只接受圖片檔")
+    raw = await file.read(MAX_MAP_BYTES + 1)
+    if len(raw) > MAX_MAP_BYTES:
+        raise HTTPException(status_code=413, detail="地圖限制 20 MiB")
+    try:
+        image = Image.open(io.BytesIO(raw))
+        if image.width * image.height > MAX_MAP_PIXELS:
+            raise HTTPException(status_code=413, detail="地圖解析度過大，限制 2000 萬像素")
+        image = ImageOps.exif_transpose(image).convert("RGB")
+    except HTTPException:
+        raise
+    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as exc:
+        raise HTTPException(status_code=400, detail="無法解析地圖圖片") from exc
+    save_path = UPLOAD_DIR / f"{room_id}_{uuid.uuid4().hex[:10]}.png"
+    image.save(save_path)
+    ROOMS[room_id].update(status="processing", error_message=None, image_url=None,
+                          csv_path=None, json_path=None, navigation_path=None, users={}, last_active=time.time())
     background_tasks.add_task(process_map_background, room_id, save_path)
     return {"message": "地圖上傳成功，開始背景解析"}
 
@@ -533,7 +564,7 @@ def _local_place_mentions(user_input: str, places: dict[str, Any]) -> list[tuple
     return [(begin, place_id, label) for begin, _, place_id, label in sorted(selected)]
 
 
-def get_user_location(user_input: str, navigation_data: dict[str, Any]) -> dict[str, Any]:
+def get_user_location(user_input: str, navigation_data: dict[str, Any], recognized_stores: list[str] | None = None) -> dict[str, Any]:
     places = navigation_data.get("places", {})
     valid_ids = set(places)
     context = navigation_data.get("llm_context", [])
@@ -552,6 +583,7 @@ def get_user_location(user_input: str, navigation_data: dict[str, Any]) -> dict[
 5. 資訊不足時，對應 id 請回傳 null，不可猜一個不存在的 id。
 
 使用者訊息：{json.dumps(user_input, ensure_ascii=False)}
+相機辨識文字（僅作為可能起點線索，不可視為確定位置）：{json.dumps(recognized_stores or [], ensure_ascii=False)}
 
 只輸出下列 JSON，不要附加說明：
 {{
@@ -623,6 +655,62 @@ def get_user_location(user_input: str, navigation_data: dict[str, Any]) -> dict[
     return result
 
 
+def plan_staged_route(graph_payload, start_node, end_node, confirmed_transfers=(), rejected_transfers=()):
+    """Plan from road waypoint IDs (or attached R_* room IDs).
+
+    Return a preview itinerary and only release walking stages up to the first
+    unconfirmed transfer. Call again after confirmation; reject IDs to replan.
+    Distances of search transfers are excluded from physical walking distance.
+    """
+    import networkx as nx
+    payload=graph_payload.get('graph',graph_payload)
+    nodes=payload['nodes']
+    def resolve(n):
+        if n not in nodes:raise ValueError('Unknown navigation node: '+str(n))
+        if nodes[n].get('type')=='room_center':
+            n=nodes[n].get('attachment_node')
+        if not n or n not in nodes:raise ValueError('Room has no valid road attachment')
+        return n
+    start_node,end_node=resolve(start_node),resolve(end_node)
+    g=nx.Graph();g.add_nodes_from(n for n,v in nodes.items() if v.get('type')!='room_center')
+    for e in payload.get('edges',[]):
+        if e.get('semantic_only') or e.get('edge_type')=='recovery_gateway':continue
+        g.add_edge(e['source'],e['target'],weight=float(e['distance_px']),transfer=None)
+    confirmed=set(confirmed_transfers);rejected=set(rejected_transfers)
+    # Prefer a fully physical route even if substantially longer.
+    penalty=1+sum(float(e.get('distance_px',0)) for e in payload.get('edges',[]))
+    for t in payload.get('corridor_transfers',[]):
+        if t['id'] in rejected or t['source'] not in g or t['target'] not in g:continue
+        if g.has_edge(t['source'],t['target']):continue
+        g.add_edge(t['source'],t['target'],weight=penalty+float(t['distance_px']),transfer=t)
+    if not nx.has_path(g,start_node,end_node):
+        return {'status':'no_route','stages':[],'reason':'沒有可行道路或有依據的交界候選，需補充入口位置。'}
+    path=nx.shortest_path(g,start_node,end_node,weight='weight')
+    stages=[];walk=[path[0]];distance=0.;blocked=False;active=[]
+    def flush():
+        nonlocal walk
+        if walk:
+            stages.append({'type':'walk','nodes':walk,'coordinates':[nodes[n]['coordinates'] for n in walk]})
+            walk=[]
+    for u,v in zip(path,path[1:]):
+        edge=g[u][v];t=edge['transfer']
+        if t:
+            flush()
+            stages.append({'type':'find_entrance','transfer_id':t['id'],'from_node':u,'to_node':v,
+                'boundary_hint':t['boundary_hint'],'requires_confirmation':t['id'] not in confirmed,
+                'instruction':t['navigation_notice'],'physical_path':None})
+            walk=[v]
+        else:
+            walk.append(v);distance+=edge['weight']
+    flush()
+    for stage in stages:
+        if blocked:break
+        active.append(stage)
+        if stage['type']=='find_entrance' and stage['requires_confirmation']:blocked=True
+    return {'status':'awaiting_entrance_confirmation' if blocked else 'ready',
+        'stages':stages,'active_stages':active,'walking_distance_px':distance,
+        'contains_unverified_transfer':any(s['type']=='find_entrance' for s in stages)}
+
 class IndoorNavigator:
     """Plan paths on llm_navigation_graph rather than on every image pixel."""
 
@@ -654,6 +742,7 @@ class IndoorNavigator:
         self.direction_bin_deg = 360.0 / self.heading_bin_count
         self.last_path_stats: dict[str, Any] = {}
 
+        self.last_staged_route = None
         self._build_adjacency()
         self.meters_per_pixel = self._parse_scale(self.data.get("map", {}).get("scale", ""))
 
@@ -672,6 +761,8 @@ class IndoorNavigator:
             "recovery_gateway": 1.14,
         }
         for edge in self.graph_data.get("edges", []):
+            if edge.get("semantic_only") or edge.get("edge_type") == "recovery_gateway":
+                continue
             source = str(edge.get("source", ""))
             target = str(edge.get("target", ""))
             if source not in self.nodes or target not in self.nodes or source == target:
@@ -1245,6 +1336,85 @@ class IndoorNavigator:
         print(f"[DEBUG ROUTE] 已輸出：{path}")
         return f"/uploads/{self.room_id}/{path.name}"
 
+    def generate_staged_guidance(self, start_node, end_node, start_id, end_id, rejected=()):
+        """V12: complete itinerary with automatic, explicitly virtual component links."""
+        import networkx as nx
+        from scipy.spatial import cKDTree
+        graph=nx.Graph()
+        graph.add_nodes_from(n for n,v in self.nodes.items() if v.get("type") != "room_center")
+        for u,neighbors in self.adjacency.items():
+            for v,e in neighbors.items():
+                if e.get("semantic_transition") or e.get("semantic_only"): continue
+                if u in graph and v in graph:
+                    graph.add_edge(u,v,weight=float(e.get("distance_px",math.dist(self._node_coords(u),self._node_coords(v)))),virtual=False)
+        components=[sorted(c) for c in nx.connected_components(graph)]
+        # Build one nearest-anchor proposal per component pair, at request time.
+        # There is deliberately no wall-gap or adjacency veto for a virtual search link.
+        penalty=1+sum(e['weight'] for _,_,e in graph.edges(data=True))
+        trees=[cKDTree([self._node_coords(n) for n in c]) for c in components]
+        for i,a in enumerate(components):
+            xy=[self._node_coords(n) for n in a]
+            for j in range(i+1,len(components)):
+                distances,indices=trees[j].query(xy)
+                idx=int(np.argmin(distances));u=a[idx];v=components[j][int(indices[idx])]
+                graph.add_edge(u,v,weight=penalty+float(distances[idx]),virtual=True,
+                               distance_px=float(distances[idx]))
+        path=nx.shortest_path(graph,start_node,end_node,weight="weight")
+        stages=[];walk=[path[0]];physical_distance=0.
+        def flush():
+            if walk:
+                stages.append({"type":"walk","nodes":list(walk),"coordinates":[list(self._node_coords(n)) for n in walk]})
+                walk.clear()
+        def landmark(n):
+            x,y=self._node_coords(n)
+            candidates=[]
+            for pid,place in self.places.items():
+                pos=place.get("centroid") or place.get("coordinates")
+                anchor=place.get("attachment_node")
+                if not pos and anchor in self.nodes: pos=self._node_coords(anchor)
+                if pos: candidates.append((math.hypot(pos[0]-x,pos[1]-y),str(pid),place.get("display_name",str(pid))))
+            return min(candidates)[2] if candidates else f"圖面座標（{x}, {y}）"
+        for u,v in zip(path,path[1:]):
+            edge=graph[u][v]
+            if edge['virtual']:
+                flush()
+                a,b=landmark(u),landmark(v)
+                notice=f"走到「{a}」附近時，請尋找通往「{b}」所在區域的入口或通道；圖上的虛線是虛擬連接，不代表已確認的實體通道。"
+                stages.append({"type":"virtual_transfer","from_node":u,"to_node":v,
+                    "coordinates":[list(self._node_coords(u)),list(self._node_coords(v))],
+                    "from_landmark":a,"to_landmark":b,"instruction":notice,
+                    "semantic_only":True,"physical_connection_confirmed":False,"requires_confirmation":False})
+                # Existing debug renderer already distinguishes semantic links with dashes.
+                self.adjacency.setdefault(u,{})[v]={"semantic_transition":True,"edge_type":"recovery_gateway"}
+                self.adjacency.setdefault(v,{})[u]={"semantic_transition":True,"edge_type":"recovery_gateway"}
+                walk.append(v)
+            else:
+                walk.append(v);physical_distance+=edge['weight']
+        flush()
+        self.last_staged_route={"status":"ready_with_virtual_links","stages":stages,
+            "active_stages":stages,"requires_confirmation":False,"walking_distance_px":physical_distance,
+            "contains_unverified_transfer":True,"node_path":path}
+        events=[]
+        for stage in stages:
+            if stage['type']=='virtual_transfer': events.append(stage['instruction']);continue
+            directions=[]
+            for a,b in zip(stage['coordinates'],stage['coordinates'][1:]):
+                dx,dy=b[0]-a[0],b[1]-a[1]
+                if not dx and not dy:continue
+                direction=('右' if dx>0 else '左') if abs(dx)>=abs(dy) else ('下' if dy>0 else '上')
+                if not directions or directions[-1]!=direction: directions.append(direction)
+            if directions:events.append('沿此區域的路線，朝圖面'+'、再朝圖面'.join(directions)+'方前進。')
+        start_name=self.places[str(start_id)].get('display_name',str(start_id))
+        end_name=self.places[str(end_id)].get('display_name',str(end_id))
+        reply=f"從「{start_name}」前往「{end_name}」的完整路線如下："+''.join(events)+f"進入目的區域後沿圖示路線前進，抵達「{end_name}」附近的停靠點。"
+        # The deterministic text is the LLM-facing response contract: no refusal,
+        # no fabricated door, no waiting for a second user turn to reveal the route.
+        points=[self._node_coords(n) for n in path]
+        debug_url=self.draw_debug_path(points,start_id=start_id,end_id=end_id,node_path=path)
+        # Legacy flat polylines cannot encode dashed versus physical segments.
+        # Supply the complete styled debug image and structured path_segments.
+        return reply,debug_url,None
+
     def _fallback_guidance(self, start_name: str, end_name: str, events: list[str]) -> str:
         body = " ".join(re.sub(r"^\[[^]]+\]\s*", "", event) for event in events)
         return f"請以面向「{start_name}」為正前方，{body} 抵達走道上的目的地停靠點後，即可到達「{end_name}」。"
@@ -1261,12 +1431,25 @@ class IndoorNavigator:
             return "指定的起點或目的地不在地圖資料中。", None, None
         start_node = self._attachment_node(start_id)
         end_node = self._attachment_node(end_id)
-        if not start_node or not end_node:
-            return "地點存在，但尚未成功吸附到可通行路網，無法安全規劃路徑。", None, None
+        # A known place without an attachment becomes an explicitly virtual endpoint.
+        # It must not be silently projected across rooms as a physical segment.
+        for place_id, node in ((start_id,start_node),(end_id,end_node)):
+            if not node:
+                place=self.places[place_id]
+                coords=place.get("centroid") or place.get("coordinates")
+                if coords is None:
+                    room_node=self.nodes.get("R_"+place_id,{})
+                    coords=room_node.get("coordinates")
+                if coords is None:
+                    return "已找到兩個地點，但其中一處缺少座標，請重新分析地圖以產生定位資料。", None, None
+                virtual_id="PLACE_"+place_id
+                self.nodes[virtual_id]={"type":"virtual_place_endpoint","coordinates":coords}
+                if place_id==start_id: start_node=virtual_id
+                if place_id==end_id: end_node=virtual_id
 
         node_path = self.shortest_path(start_node, end_node)
         if not node_path:
-            return "起點與目的地分屬未連通的路網，目前無法規劃安全路徑。", None, None
+            return self.generate_staged_guidance(start_node, end_node, start_id, end_id)
         # Hard endpoint invariant: a route may never silently terminate at a third node.
         if node_path[0] != start_node or node_path[-1] != end_node:
             print(
@@ -1286,41 +1469,10 @@ class IndoorNavigator:
         start_name = self.places[start_id]["display_name"]
         end_name = self.places[end_id]["display_name"]
         events = self.extract_node_path_events(node_path, start_id, end_id)
-        event_text = "\n".join(events)
         fallback = self._fallback_guidance(start_name, end_name, events)
 
-        prompt = f"""
-你是室內導航語音助手。路徑已由拓樸圖最短路徑演算法算完；你只能潤飾指令，不可自行改路線或新增轉彎。
-起點：{start_name}
-目的地：{end_name}
-地圖比例：{self.data.get('map', {}).get('scale')}
-抵達規則：終點是走道上最接近目的地的 attachment point，不進入房間內部。
-跨區規則：若事件包含「[跨區入口]」，該連線只是兩個公共走道區域之間的近似可通行關係，不是已偵測到的實體門或精確入口。你必須保留「在附近尋找入口」的提醒，不可把紅色示意線描述成可以直接穿越的牆、門或精確通道，也不可省略這項不確定性。
 
-【演算法事件】
-{event_text}
-
-請輸出單一連續中文段落。第一句必須是「請以面向『{start_name}』為正前方」，接著依序說明起步、直行、轉向與必要的跨區入口搜尋；沿途地標每段最多兩個。若有跨區入口，必須明確說「請在附近尋找入口」，找到可實際通行入口後再繼續後續路線。最後明確說抵達「{end_name}」。不要輸出標題、條列、思考過程或額外路線。
-"""
         reply = fallback
-        try:
-            response = _ollama_generate(prompt=prompt)
-            candidate = re.sub(r"<think>.*?</think>", "", _extract_ollama_text(response), flags=re.DOTALL).strip()
-            # A fluent sentence is accepted only when it preserves both endpoints and
-            # the required initial-orientation contract. Otherwise use deterministic text.
-            gateway_required = any(event.startswith("[跨區入口]") for event in events)
-            gateway_notice_ok = (not gateway_required) or ("附近" in candidate and "入口" in candidate)
-            if (
-                candidate
-                and candidate.startswith("請以面向")
-                and str(start_name) in candidate
-                and str(end_name) in candidate
-                and gateway_notice_ok
-            ):
-                reply = candidate
-        except Exception as exc:
-            print(f"[警告] LLM 導航潤飾失敗，使用演算法產生的文字：{exc}")
-
         path_coords = [[int(x), int(y)] for x, y in points]
         debug_url = self.draw_debug_path(raw_points, start_id=start_id, end_id=end_id, node_path=node_path)
         return reply, debug_url, path_coords
@@ -1390,9 +1542,21 @@ async def get_room_status(room_id: str):
     }
 
 
+def remember_staged_route(room, route_id, route, start_id, end_id, rejected=()):
+    if not route or route.get("status") != "awaiting_entrance_confirmation": return
+    gate = next(s for s in route["active_stages"] if s["type"] == "find_entrance")
+    pending = room.setdefault("pending_routes", {})
+    # Bound memory for long-lived shared sessions.
+    if len(pending) >= 32: pending.pop(next(iter(pending)))
+    pending[route_id] = {**gate, "start_id": str(start_id), "end_id": str(end_id), "rejected": list(rejected)}
+
+
 class ChatRequest(BaseModel):
     message: str
     room_id: str | None = None
+    route_id: str | None = None
+    recognized_stores: list[str] = Field(default_factory=list, max_length=10)
+    transfer_action: str | None = None
 
 
 @app.post("/chat")
@@ -1414,7 +1578,36 @@ async def chat_with_llama(req_data: ChatRequest):
     with open(room["navigation_path"], "r", encoding="utf-8") as file:
         navigation_data = json.load(file)
 
-    location = get_user_location(req_data.message, navigation_data)
+    pending_routes = room.setdefault("pending_routes", {})
+    action = req_data.transfer_action
+    if action is None:
+        text = req_data.message.strip().rstrip("。！!")
+        if text == "已進入下一走道": action = "confirm"
+        elif text == "找不到入口": action = "reject"
+    if action in {"confirm", "reject"}:
+        route_id = req_data.route_id
+        if route_id is None and len(pending_routes) == 1:
+            route_id = next(iter(pending_routes))
+        pending = pending_routes.get(route_id)
+        if not pending:
+            return {"reply": "沒有可確認的導航，或有多筆待確認導航。請提供 route_id，或重新輸入起點與目的地。"}
+        navigator = IndoorNavigator(room["navigation_path"], req_data.room_id)
+        start_node = pending["to_node"] if action == "confirm" else pending["from_node"]
+        rejected = list(pending.get("rejected", []))
+        if action == "reject": rejected.append(pending["transfer_id"])
+        final_text, debug_url, path_coords = navigator.generate_staged_guidance(
+            start_node, navigator._attachment_node(pending["end_id"]),
+            pending["start_id"], pending["end_id"], rejected)
+        route = navigator.last_staged_route
+        if debug_url: room["last_debug_route_url"] = debug_url
+        pending_routes.pop(route_id, None)
+        remember_staged_route(room, route_id, route, pending["start_id"], pending["end_id"], rejected)
+        return {"reply": final_text, "path_coords": path_coords, "debug_route_url": debug_url,
+                "route_id": route_id, "route": route,
+                "resolved_start_id": pending["start_id"], "resolved_end_id": pending["end_id"]}
+
+    stores = [value.strip()[:120] for value in req_data.recognized_stores if value.strip()]
+    location = get_user_location(req_data.message, navigation_data, stores)
     start_id = location.get("current_room_id")
     end_id = location.get("destination_id")
     if not start_id:
@@ -1429,6 +1622,8 @@ async def chat_with_llama(req_data: ChatRequest):
         user_start_name=location.get("current_room_name") or None,
         user_end_name=location.get("destination_name") or None,
     )
+    route_id = uuid.uuid4().hex
+    remember_staged_route(room, route_id, navigator.last_staged_route, str(start_id), str(end_id))
     reply = final_text
     if debug_url:
         room["last_debug_route_url"] = debug_url
@@ -1437,6 +1632,9 @@ async def chat_with_llama(req_data: ChatRequest):
         "reply": reply,
         "path_coords": path_coords,
         "debug_route_url": debug_url,
+        "route_id": route_id,
+        "route": navigator.last_staged_route,
+        "path_segments": (navigator.last_staged_route or {}).get("stages", []),
         "resolved_start_id": str(start_id),
         "resolved_end_id": str(end_id),
     }
@@ -1449,9 +1647,9 @@ async def serve_frontend():
 
 class PositionUpdate(BaseModel):
     user_id: str
-    x: float
-    y: float
-    color: str
+    x: float = Field(ge=0, allow_inf_nan=False)
+    y: float = Field(ge=0, allow_inf_nan=False)
+    color: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
 
 
 @app.post("/update_position/{room_id}")

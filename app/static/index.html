@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#000000">
+  <title>MapAndLLM 視覺導航</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <!-- 相機授權前：只顯示簡潔的啟動畫面 -->
+  <main id="launchScreen" class="launch-screen">
+    <div class="launch-card">
+      <div class="launch-mark" aria-hidden="true">◎</div>
+      <h1>MapAndLLM 視覺導航</h1>
+      <p>用相機讀取招牌，在地圖上規劃路線，向 AI 詢問方向。</p>
+      <button id="startButton" class="primary-button" type="button">啟動相機</button>
+      <button id="navigationOnlyButton" class="glass-button secondary-button" type="button">先使用地圖與導航</button>
+      <div id="launchStatus" class="launch-status" aria-live="polite">尚未啟動相機</div>
+    </div>
+  </main>
+
+  <!-- 相機授權成功後才顯示 -->
+  <main id="cameraApp" class="camera-app" aria-hidden="true">
+    <div id="cameraStage" class="camera-stage">
+      <video id="cameraVideo" autoplay muted playsinline></video>
+      <canvas id="overlayCanvas" aria-hidden="true"></canvas>
+
+      <div class="camera-shade camera-shade-top" aria-hidden="true"></div>
+      <div class="camera-shade camera-shade-bottom" aria-hidden="true"></div>
+
+      <!-- 頂部控制 -->
+      <div class="top-ui">
+        <button id="stopButton" class="glass-button icon-button" type="button" aria-label="停止相機">×</button>
+
+        <div id="statusPill" class="status-pill" aria-live="polite">
+          <span id="statusDot" class="status-dot"></span>
+          <span id="status">相機已啟動</span>
+        </div>
+
+        <button id="settingsButton" class="glass-button icon-button" type="button" aria-label="辨識設定">⋯</button>
+      </div>
+
+      <!-- 最近辨識到的文字，保持低干擾 -->
+      <div id="recognitionToast" class="recognition-toast" hidden>
+        <span id="recognitionText"></span>
+      </div>
+
+      <!-- 地圖面板 -->
+      <section id="mapPanel" class="floating-panel map-panel" aria-hidden="true">
+        <header class="panel-header">
+          <div>
+            <strong>商場地圖</strong>
+            <span id="mapStatus" role="status">建立或加入房間後上傳地圖</span>
+          </div>
+          <button class="panel-close" type="button" data-close-panel="mapPanel" aria-label="收起地圖">×</button>
+        </header>
+        <div class="room-controls">
+          <div class="room-actions">
+            <button id="createRoomButton" class="glass-button" type="button">建立房間</button>
+            <input id="inviteCode" aria-label="房間邀請碼" placeholder="邀請碼" maxlength="40">
+            <button id="joinRoomButton" class="glass-button" type="button">加入</button>
+          </div>
+          <div class="room-actions">
+            <span id="roomCode">尚未加入房間</span>
+            <button id="copyRoomButton" class="glass-button" type="button" disabled>複製連結</button>
+          </div>
+          <label class="map-upload">上傳地圖（最多 20 MiB）<input id="mapInput" type="file" accept="image/*" disabled></label>
+        </div>
+        <div class="map-viewport">
+          <p id="mapEmpty">上傳商場平面圖後，即可詢問從哪裡走到目的地。</p>
+          <div id="map-wrapper" hidden>
+            <img id="map-image" alt="上傳的商場地圖">
+            <svg id="path-svg" aria-label="導航路線"></svg>
+          </div>
+        </div>
+        <div class="map-footer">
+          <p>步行定位：點地圖設定起點，走一段並數步數，再點終點校正。</p>
+          <button id="start-tracking-btn" class="glass-button hidden" type="button">開始步行定位</button>
+          <span id="heading-display"></span>
+        </div>
+      </section>
+
+      <!-- 聊天面板 -->
+      <section id="chatPanel" class="floating-panel chat-panel" aria-hidden="true">
+        <header class="panel-header">
+          <div>
+            <strong>AI 助手</strong>
+            <span>依地圖與招牌線索規劃路線</span>
+          </div>
+          <button class="panel-close" type="button" data-close-panel="chatPanel" aria-label="收起聊天">×</button>
+        </header>
+
+        <div id="chatMessages" class="chat-messages" aria-live="polite">
+          <div class="chat-message assistant">
+            <div class="chat-bubble">請先到地圖面板建立房間並上傳地圖，再描述起點與目的地，例如「我在 A 店，要去 B 店」。</div>
+          </div>
+        </div>
+
+        <label class="ocr-context"><input id="useOcrContext" type="checkbox" checked>使用最近 60 秒的招牌文字作為位置線索</label>
+        <div class="chat-composer">
+          <textarea id="chatInput" rows="1" placeholder="輸入訊息…" aria-label="聊天訊息"></textarea>
+          <button id="chatSendButton" class="send-button" type="button">傳送</button>
+        </div>
+      </section>
+
+      <!-- 設定面板，保留原本每 N 幀辨識的能力 -->
+      <section id="settingsPanel" class="settings-panel" aria-hidden="true">
+        <div class="settings-row">
+          <label for="frameInterval">辨識頻率</label>
+          <select id="frameInterval">
+            <option value="10">每 10 幀</option>
+            <option value="15" selected>每 15 幀</option>
+            <option value="30">每 30 幀</option>
+            <option value="60">每 60 幀</option>
+          </select>
+        </div>
+        <label class="switch-row" for="autoRecognize">
+          <span>自動辨識</span>
+          <input id="autoRecognize" type="checkbox" checked>
+        </label>
+      </section>
+
+      <!-- 底部主要操作 -->
+      <nav class="bottom-ui" aria-label="相機工具">
+        <button id="mapButton" class="glass-button tool-button" type="button" aria-expanded="false" aria-controls="mapPanel">
+          <span class="tool-icon" aria-hidden="true">⌖</span>
+          <span>地圖</span>
+        </button>
+
+        <button id="captureButton" class="capture-button" type="button" aria-label="立即辨識">
+          <span></span>
+        </button>
+
+        <button id="chatButton" class="glass-button tool-button" type="button" aria-expanded="false" aria-controls="chatPanel">
+          <span class="tool-icon" aria-hidden="true">✦</span>
+          <span>聊天</span>
+        </button>
+      </nav>
+    </div>
+
+    <!-- 用來擷取相機 frame，不顯示 -->
+    <canvas id="captureCanvas" hidden></canvas>
+  </main>
+
+  <script src="/static/app.js"></script>
+  <script src="/static/navigation.js"></script>
+  <script src="/static/pdr_engine.js"></script>
+</body>
+</html>

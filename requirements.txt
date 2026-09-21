@@ -1,11 +1,16 @@
-fastapi>=0.110
-uvicorn[standard]>=0.29
-python-multipart>=0.0.9
-numpy>=1.24
-pandas>=2.0
-opencv-contrib-python>=4.8
-easyocr>=1.7
-torch>=2.1
-ultralytics>=8.2
-networkx>=3.1
-ollama>=0.3
+# 先另外安裝 PyTorch GPU 與 PaddlePaddle CPU；不要把兩個 runtime 寫在此檔案。
+fastapi>=0.115,<1
+uvicorn[standard]>=0.34,<1
+python-multipart>=0.0.20,<1
+Pillow>=10,<13
+numpy>=1.26,<3
+transformers>=4.51,<6
+accelerate>=1,<2
+paddleocr>=3.0,<4
+
+# Map analysis (OpenCV provided by paddleocr)
+easyocr>=1.7,<2
+ultralytics>=8.3,<9
+httpx>=0.28,<1
+pandas>=2,<4
+networkx>=3.1,<4
