@@ -21,7 +21,8 @@ from starlette.concurrency import run_in_threadpool
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from app.pipeline import SignOCRPipeline
-from navigation import app as navigation_app, UPLOAD_DIR, YOLO_MODEL_PATH, LLM_MODEL
+import navigation
+from navigation import app as navigation_app, UPLOAD_DIR, YOLO_MODEL_PATH, LLM_MODEL, locate_from_ocr, ROOMS
 
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BASE_DIR.parent
@@ -45,6 +46,41 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 _pipeline: SignOCRPipeline | None = None
 _pipeline_init_lock = threading.Lock()
+_warmup_lock = threading.Lock()
+_warmup_status = "idle"
+_warmup_error: str | None = None
+
+
+def _run_camera_warmup() -> None:
+    global _warmup_status, _warmup_error
+    try:
+        with navigation.GPU_RESOURCE_LOCK:
+            pipeline = get_pipeline()
+            pipeline.warmup()
+    except Exception as exc:
+        print(f"[server] 相機模型預熱失敗: {exc}", flush=True)
+        with _warmup_lock:
+            _warmup_status = "error"
+            _warmup_error = str(exc)
+    else:
+        with _warmup_lock:
+            _warmup_status = "ready"
+            _warmup_error = None
+        print("[server] 相機模型預熱完成。", flush=True)
+
+
+def request_camera_warmup() -> None:
+    """Schedule one process-wide warmup without delaying room creation."""
+    global _warmup_status, _warmup_error
+    with _warmup_lock:
+        if _warmup_status in {"warming", "ready"}:
+            return
+        _warmup_status = "warming"
+        _warmup_error = None
+        threading.Thread(target=_run_camera_warmup, name="camera-model-warmup", daemon=True).start()
+
+
+navigation.camera_warmup_callback = request_camera_warmup
 
 
 def get_pipeline() -> SignOCRPipeline:
@@ -61,9 +97,12 @@ def get_pipeline() -> SignOCRPipeline:
     return _pipeline
 
 
-def recognize_image(image: Image.Image) -> list[dict[str, Any]]:
-    detections = get_pipeline().recognize(image)
-    return [asdict(item) for item in detections]
+def recognize_image(image: Image.Image) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    initialized_at = time.perf_counter()
+    pipeline = get_pipeline()
+    model_load_ms = round((time.perf_counter() - initialized_at) * 1000, 1)
+    detections, timings = pipeline.recognize_with_timings(image)
+    return [asdict(item) for item in detections], {"model_load_ms": model_load_ms, **timings}
 
 
 def _safe_extension(content_type: str | None, filename: str | None) -> str:
@@ -213,6 +252,8 @@ def health() -> dict[str, Any]:
     return {
         "ok": True,
         "model_loaded": _pipeline is not None,
+        "camera_warmup_status": _warmup_status,
+        "camera_warmup_error": _warmup_error,
         "version": "2.0.0",
         "map_model_available": YOLO_MODEL_PATH.is_file(),
         "llm_model": LLM_MODEL,
@@ -239,12 +280,14 @@ async def recognize(
     if len(raw) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="圖片太大，限制 8 MB")
 
+    received_at = time.perf_counter()
     try:
         pil_image = Image.open(io.BytesIO(raw))
         pil_image = ImageOps.exif_transpose(pil_image).convert("RGB")
     except (UnidentifiedImageError, OSError, ValueError) as exc:
         raise HTTPException(status_code=400, detail="無法解析圖片") from exc
 
+    decode_ms = round((time.perf_counter() - received_at) * 1000, 1)
     day, capture_id = _make_capture_id(frame_number)
     extension = _safe_extension(image.content_type, image.filename)
 
@@ -253,8 +296,10 @@ async def recognize(
     annotated_path = SAVE_ROOT / "annotated" / day / f"{capture_id}.jpg"
     crop_dir = SAVE_ROOT / "crops" / day / capture_id
 
+    capture_save_at = time.perf_counter()
     capture_path.parent.mkdir(parents=True, exist_ok=True)
     capture_path.write_bytes(raw)
+    capture_save_ms = round((time.perf_counter() - capture_save_at) * 1000, 1)
 
     width, height = pil_image.size
     started = time.perf_counter()
@@ -276,14 +321,21 @@ async def recognize(
         },
     }
 
+    inference_at = time.perf_counter()
     try:
-        detections = await run_in_threadpool(recognize_image, pil_image)
+        recognized = await run_in_threadpool(recognize_image, pil_image)
+        if isinstance(recognized, tuple):
+            detections, model_timings = recognized
+        else:
+            detections, model_timings = recognized, {}
     except Exception as exc:
         processing_ms = round((time.perf_counter() - started) * 1000, 1)
         error_payload = {
             **base_metadata,
             "ok": False,
             "processing_ms": processing_ms,
+            "timings": {"decode_ms": decode_ms, "capture_save_ms": capture_save_ms,
+                        "inference_until_error_ms": round((time.perf_counter() - inference_at) * 1000, 1)},
             "detections": [],
             "error": {
                 "type": type(exc).__name__,
@@ -302,18 +354,25 @@ async def recognize(
             },
         ) from exc
 
-    processing_ms = round((time.perf_counter() - started) * 1000, 1)
-
+    inference_total_ms = round((time.perf_counter() - inference_at) * 1000, 1)
     crop_paths: list[str] = []
+    annotation_at = time.perf_counter()
     if SAVE_ANNOTATED:
         await run_in_threadpool(_save_annotated, pil_image, detections, annotated_path)
+    annotation_ms = round((time.perf_counter() - annotation_at) * 1000, 1)
+    crops_at = time.perf_counter()
     if SAVE_CROPS:
         crop_paths = await run_in_threadpool(_save_crops, pil_image, detections, crop_dir)
+    crop_save_ms = round((time.perf_counter() - crops_at) * 1000, 1)
+    processing_ms = round((time.perf_counter() - started) * 1000, 1)
 
     payload: dict[str, Any] = {
         **base_metadata,
         "ok": True,
         "processing_ms": processing_ms,
+        "timings": {"decode_ms": decode_ms, "capture_save_ms": capture_save_ms,
+                    "inference_total_ms": inference_total_ms, **model_timings,
+                    "annotation_ms": annotation_ms, "crop_save_ms": crop_save_ms},
         "detections": detections,
     }
     payload["saved"]["crops"] = crop_paths
@@ -321,10 +380,39 @@ async def recognize(
     await run_in_threadpool(_save_json, result_path, payload)
 
     print(
+        f"[server] timing {capture_id}: {json.dumps(payload['timings'], ensure_ascii=False)}",
+        flush=True,
+    )
+    print(
         f"[server] saved {capture_id}: "
         f"capture={_relative(capture_path)} result={_relative(result_path)}",
         flush=True,
     )
     return payload
+
+
+class OCRLocationRequest(BaseModel):
+    room_id: str
+    user_id: str = Field(min_length=1, max_length=100)
+    color: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
+    capture_id: str = Field(pattern=r"^[0-9]{8}_[0-9]{6}_[0-9]{6}(?:_f[0-9]{6})?_[0-9a-f]{8}$")
+
+
+@app.post("/api/locate_from_ocr")
+async def locate_from_saved_ocr(request: OCRLocationRequest) -> dict[str, Any]:
+    if request.room_id not in ROOMS:
+        raise HTTPException(status_code=404, detail="房間不存在")
+    # Capture IDs contain the local date; never accept a client-supplied file path.
+    day = f"{request.capture_id[:4]}-{request.capture_id[4:6]}-{request.capture_id[6:8]}"
+    result_path = SAVE_ROOT / "results" / day / f"{request.capture_id}.json"
+    if not result_path.is_file():
+        raise HTTPException(status_code=404, detail="找不到 OCR 結果")
+    try:
+        ocr_data = await run_in_threadpool(lambda: json.loads(result_path.read_text(encoding="utf-8")))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="OCR 結果無法讀取") from exc
+    if not isinstance(ocr_data, dict) or ocr_data.get("capture_id") != request.capture_id:
+        raise HTTPException(status_code=400, detail="OCR 結果格式錯誤")
+    return await run_in_threadpool(locate_from_ocr, request.room_id, ocr_data, request.user_id, request.color)
 
 app.mount("/api", navigation_app, name="navigation")

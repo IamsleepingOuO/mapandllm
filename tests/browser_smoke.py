@@ -66,6 +66,8 @@ def main():
                 errors = []
                 page.on("pageerror", lambda error: errors.append(str(error)))
                 page.goto(f"http://127.0.0.1:{port}")
+                expect(page.locator("#frameInterval")).to_have_value("1000")
+                expect(page.locator("#captureWidth")).to_have_value("768")
                 page.click("#navigationOnlyButton")
                 page.click("#createRoomButton")
                 expect(page.locator("#roomCode")).to_contain_text("房間")

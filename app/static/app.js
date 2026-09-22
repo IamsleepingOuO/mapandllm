@@ -1,6 +1,9 @@
 "use strict";
 
-const MAX_CAPTURE_WIDTH = 960;
+const MOTION_SAMPLE_WIDTH = 32;
+const MOTION_SAMPLE_HEIGHT = 24;
+const MOTION_THRESHOLD = 6;
+const MAX_STILL_REFRESH_MS = 10000;
 const JPEG_QUALITY = 0.78;
 
 const launchScreen = document.getElementById("launchScreen");
@@ -17,6 +20,11 @@ const stopButton = document.getElementById("stopButton");
 const captureButton = document.getElementById("captureButton");
 const settingsButton = document.getElementById("settingsButton");
 const frameIntervalSelect = document.getElementById("frameInterval");
+const captureWidthSelect = document.getElementById("captureWidth");
+const motionCanvas = document.createElement("canvas");
+motionCanvas.width = MOTION_SAMPLE_WIDTH;
+motionCanvas.height = MOTION_SAMPLE_HEIGHT;
+const motionContext = motionCanvas.getContext("2d", {willReadFrequently: true});
 const autoRecognizeCheckbox = document.getElementById("autoRecognize");
 const launchStatusElement = document.getElementById("launchStatus");
 const statusPill = document.getElementById("statusPill");
@@ -43,6 +51,11 @@ let requestInFlight = false;
 let requestSequence = 0;
 let lastResponse = null;
 let lastRecognitionAt = 0;
+let lastAutoCaptureAt = 0;
+let lastAnalyzedSample = null;
+let lastCaptureStartedAt = 0;
+let locationTimer = null;
+let locationRequestInFlight = false;
 let chatRequestInFlight = false;
 
 startButton.addEventListener("click", startCamera);
@@ -98,6 +111,10 @@ async function startCamera() {
     captureButton.disabled = false;
     frameNumber = 0;
     fallbackLastVideoTime = -1;
+    lastAutoCaptureAt = performance.now();
+    lastAnalyzedSample = null;
+    lastCaptureStartedAt = 0;
+    locationTimer = setInterval(() => void locateFromLatestOcr(), 5000);
 
     document.body.classList.add("camera-active");
     cameraApp.setAttribute("aria-hidden", "false");
@@ -124,6 +141,10 @@ function stopCamera() {
   running = false;
   requestSequence += 1;
   lastRecognitionAt = 0;
+  lastAnalyzedSample = null;
+  lastCaptureStartedAt = 0;
+  clearInterval(locationTimer);
+  locationTimer = null;
 
   if (callbackId !== null) {
     if (typeof video.cancelVideoFrameCallback === "function") {
@@ -181,10 +202,7 @@ function onVideoFrame() {
   if (!running) return;
 
   frameNumber += 1;
-  if (autoRecognizeCheckbox.checked) {
-    const interval = Number(frameIntervalSelect.value);
-    if (frameNumber % interval === 0) void captureAndRecognize(false);
-  }
+  maybeAutoCapture();
 
   scheduleNextFrame();
 }
@@ -196,13 +214,61 @@ function onAnimationFrame() {
     fallbackLastVideoTime = video.currentTime;
     frameNumber += 1;
 
-    if (autoRecognizeCheckbox.checked) {
-      const interval = Number(frameIntervalSelect.value);
-      if (frameNumber % interval === 0) void captureAndRecognize(false);
-    }
+    maybeAutoCapture();
   }
 
   scheduleNextFrame();
+}
+
+function maybeAutoCapture() {
+  if (!autoRecognizeCheckbox.checked || requestInFlight) return;
+  const intervalMs = Math.max(100, Number(frameIntervalSelect.value) || 1000);
+  const now = performance.now();
+  if (now - lastAutoCaptureAt >= intervalMs) {
+    lastAutoCaptureAt = now;
+    void captureAndRecognize(false);
+  }
+}
+
+async function locateFromLatestOcr() {
+  if (!running || locationRequestInFlight || !lastResponse?.capture_id ||
+      !document.getElementById("useOcrContext").checked ||
+      Date.now() - lastRecognitionAt > 60000 ||
+      typeof window.navigationLocateFromOcr !== "function") return;
+  locationRequestInFlight = true;
+  const captureId = lastResponse.capture_id;
+  try {
+    const result = await window.navigationLocateFromOcr(captureId);
+    if (result?.status === "located") {
+      setStatus(`已定位：${result.place_name}`, "ready");
+    } else if (result?.status === "llm_unavailable") {
+      setStatus("定位比對暫時無法使用", "error");
+    }
+  } catch (error) {
+    console.error("OCR 定位失敗", error);
+  } finally {
+    locationRequestInFlight = false;
+  }
+}
+
+function sampleCameraFrame() {
+  motionContext.drawImage(video, 0, 0, MOTION_SAMPLE_WIDTH, MOTION_SAMPLE_HEIGHT);
+  const rgba = motionContext.getImageData(0, 0, MOTION_SAMPLE_WIDTH, MOTION_SAMPLE_HEIGHT).data;
+  const gray = new Uint8Array(MOTION_SAMPLE_WIDTH * MOTION_SAMPLE_HEIGHT);
+  for (let i = 0; i < gray.length; i++) {
+    const offset = i * 4;
+    gray[i] = (rgba[offset] * 3 + rgba[offset + 1] * 6 + rgba[offset + 2]) / 10;
+  }
+  return gray;
+}
+
+function frameHasChanged(sample) {
+  if (!lastAnalyzedSample || lastAnalyzedSample.length !== sample.length) return true;
+  let difference = 0;
+  for (let i = 0; i < sample.length; i++) {
+    difference += Math.abs(sample[i] - lastAnalyzedSample[i]);
+  }
+  return difference / sample.length >= MOTION_THRESHOLD;
 }
 
 async function captureAndRecognize(force = false) {
@@ -220,6 +286,17 @@ async function captureAndRecognize(force = false) {
     return;
   }
 
+  const now = performance.now();
+  let sample = null;
+  try {
+    sample = sampleCameraFrame();
+  } catch (error) {
+    console.warn("畫面變動偵測不可用，照常辨識", error);
+  }
+  if (!force && sample && !frameHasChanged(sample) &&
+      now - lastCaptureStartedAt < MAX_STILL_REFRESH_MS) return;
+  lastAnalyzedSample = sample;
+  lastCaptureStartedAt = now;
   requestInFlight = true;
   captureButton.disabled = true;
   const sequence = ++requestSequence;
@@ -227,7 +304,8 @@ async function captureAndRecognize(force = false) {
   try {
     const sourceWidth = video.videoWidth;
     const sourceHeight = video.videoHeight;
-    const width = Math.min(MAX_CAPTURE_WIDTH, sourceWidth);
+    const configuredWidth = Number(captureWidthSelect.value) || 768;
+    const width = Math.min(configuredWidth, sourceWidth);
     const height = Math.round(sourceHeight * width / sourceWidth);
 
     if (captureCanvas.width !== width || captureCanvas.height !== height) {

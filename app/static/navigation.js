@@ -171,6 +171,25 @@ const myColor = "#6ee7a8";
     }
     return data.reply || "沒有收到回覆";
   };
+  window.navigationLocateFromOcr = async captureId => {
+    if (!currentRoomId || !isMapReady) return {status: "map_not_ready"};
+    const roomId = currentRoomId;
+    const version = generation;
+    const result = await post("/api/locate_from_ocr", {
+      room_id: roomId, user_id: myUserId, color: myColor, capture_id: captureId
+    });
+    if (version !== generation || roomId !== currentRoomId) return {status: "map_not_ready"};
+    if (result.status === "located") {
+      myPosition = {x: result.x, y: result.y};
+      const image = el("map-image");
+      if (image.complete && image.naturalWidth) updateDotUI(myUserId, result.x, result.y, myColor);
+      else image.addEventListener("load", () => updateDotUI(myUserId, result.x, result.y, myColor), {once: true});
+      status(`相機定位：${result.place_name}`);
+    } else if (result.status === "full") {
+      status("房間已達兩人定位上限", true);
+    }
+    return result;
+  };
   window.syncPosition = async () => {
     if (!currentRoomId || !myPosition) return;
     try {

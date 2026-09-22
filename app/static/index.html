@@ -106,15 +106,22 @@
         </div>
       </section>
 
-      <!-- 設定面板，保留原本每 N 幀辨識的能力 -->
+      <!-- 設定面板：以時間間隔控制自動辨識 -->
       <section id="settingsPanel" class="settings-panel" aria-hidden="true">
         <div class="settings-row">
-          <label for="frameInterval">辨識頻率</label>
+          <label for="frameInterval">拍照間隔</label>
           <select id="frameInterval">
-            <option value="10">每 10 幀</option>
-            <option value="15" selected>每 15 幀</option>
-            <option value="30">每 30 幀</option>
-            <option value="60">每 60 幀</option>
+            <option value="500">每 500 毫秒</option>
+            <option value="1000" selected>每 1000 毫秒</option>
+            <option value="2000">每 2000 毫秒</option>
+            <option value="5000">每 5000 毫秒</option>
+          </select>
+        </div>
+        <div class="settings-row">
+          <label for="captureWidth">辨識圖片寬度</label>
+          <select id="captureWidth">
+            <option value="768" selected>768 px（較快）</option>
+            <option value="960">960 px（小字較清楚）</option>
           </select>
         </div>
         <label class="switch-row" for="autoRecognize">

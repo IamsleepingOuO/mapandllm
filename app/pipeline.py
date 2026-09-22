@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,11 +33,15 @@ class SignOCRPipeline:
         )
         self.device = self._resolve_torch_device(os.getenv("DINO_DEVICE", "auto"))
         self.ocr_device = os.getenv("OCR_DEVICE", "cpu")
+        self.ocr_det_model = os.getenv("OCR_DET_MODEL", "PP-OCRv5_server_det")
+        self.ocr_rec_model = os.getenv("OCR_REC_MODEL", "PP-OCRv5_server_rec")
 
         self.box_threshold = float(os.getenv("DINO_BOX_THRESHOLD", "0.25"))
         self.text_threshold = float(os.getenv("DINO_TEXT_THRESHOLD", "0.22"))
         self.ocr_threshold = float(os.getenv("OCR_SCORE_THRESHOLD", "0.45"))
-        self.max_detections = int(os.getenv("MAX_DETECTIONS", "8"))
+        self.max_detections = max(1, int(os.getenv("MAX_DETECTIONS", "3")))
+        self.dino_short_edge = max(256, int(os.getenv("DINO_SHORT_EDGE", "640")))
+        self.dino_long_edge = max(self.dino_short_edge, int(os.getenv("DINO_LONG_EDGE", "1067")))
         self.min_box_area_ratio = float(os.getenv("MIN_BOX_AREA_RATIO", "0.002"))
         self.crop_padding_ratio = float(os.getenv("CROP_PADDING_RATIO", "0.08"))
         self.ocr_enable_mkldnn = self._env_bool("OCR_ENABLE_MKLDNN", False)
@@ -69,6 +74,8 @@ class SignOCRPipeline:
             lang=os.getenv("OCR_LANG", "chinese_cht"),
             ocr_version=os.getenv("OCR_VERSION", "PP-OCRv5"),
             device=self.ocr_device,
+            text_detection_model_name=self.ocr_det_model,
+            text_recognition_model_name=self.ocr_rec_model,
             enable_mkldnn=self.ocr_enable_mkldnn,
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
@@ -96,17 +103,39 @@ class SignOCRPipeline:
             return "mps"
         return "cpu"
 
-    def recognize(self, image: Image.Image) -> list[Detection]:
-        image = image.convert("RGB")
+    def warmup(self) -> None:
+        """Run both inference engines once before a camera capture arrives."""
+        from PIL import ImageDraw
+
+        image = Image.new("RGB", (640, 384), "white")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((100, 130, 540, 245), fill="black")
+        draw.text((180, 170), "SHOP 123", fill="white")
         with self._inference_lock:
-            candidates = self._detect_signs(image)
+            self._detect_signs(image)
+            self._run_ocr(image.crop((100, 130, 540, 245)))
+
+    def recognize(self, image: Image.Image) -> list[Detection]:
+        detections, _ = self.recognize_with_timings(image)
+        return detections
+
+    def recognize_with_timings(self, image: Image.Image) -> tuple[list[Detection], dict[str, Any]]:
+        image = image.convert("RGB")
+        waiting_at = time.perf_counter()
+        with self._inference_lock:
+            lock_ms = (time.perf_counter() - waiting_at) * 1000
+            detection_at = time.perf_counter()
+            candidates, detection_timings = self._detect_signs(image, with_timings=True)
+            detection_ms = (time.perf_counter() - detection_at) * 1000
             detections: list[Detection] = []
+            ocr_ms: list[float] = []
 
             for candidate in candidates:
+                ocr_at = time.perf_counter()
                 padded_box = self._pad_box(candidate["box"], image.size)
                 crop = image.crop(tuple(map(int, padded_box)))
                 text, ocr_score, lines = self._run_ocr(crop)
-
+                ocr_ms.append(round((time.perf_counter() - ocr_at) * 1000, 1))
                 detections.append(
                     Detection(
                         box=[round(value, 2) for value in padded_box],
@@ -118,20 +147,41 @@ class SignOCRPipeline:
                     )
                 )
 
-            return detections
+            timings = {
+                "model_lock_wait_ms": round(lock_ms, 1),
+                "dino_total_ms": round(detection_ms, 1),
+                **detection_timings,
+                "ocr_total_ms": round(sum(ocr_ms), 1),
+                "ocr_per_crop_ms": ocr_ms,
+                "ocr_crop_count": len(ocr_ms),
+                "max_detections": self.max_detections,
+                "ocr_det_model": self.ocr_det_model,
+                "ocr_rec_model": self.ocr_rec_model,
+            }
+            return detections, timings
 
-    def _detect_signs(self, image: Image.Image) -> list[dict[str, Any]]:
+    def _detect_signs(
+        self, image: Image.Image, *, with_timings: bool = False
+    ) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], dict[str, Any]]:
         # Transformers Grounding DINO 支援 nested list 的文字類別輸入。
         text_labels = [self.labels]
+        preprocess_at = time.perf_counter()
         inputs = self.processor(
             images=image,
             text=text_labels,
+            size={"shortest_edge": self.dino_short_edge, "longest_edge": self.dino_long_edge},
             return_tensors="pt",
         ).to(self.device)
 
+        preprocess_ms = (time.perf_counter() - preprocess_at) * 1000
+        inference_at = time.perf_counter()
         with torch.inference_mode():
             outputs = self.model(**inputs)
+        if self.device.startswith("cuda"):
+            torch.cuda.synchronize()
+        inference_ms = (time.perf_counter() - inference_at) * 1000
 
+        postprocess_at = time.perf_counter()
         results = self.processor.post_process_grounded_object_detection(
             outputs,
             inputs.input_ids,
@@ -159,7 +209,17 @@ class SignOCRPipeline:
 
         candidates.sort(key=lambda item: item["score"], reverse=True)
         candidates = self._nms(candidates, iou_threshold=0.55)
-        return candidates[: self.max_detections]
+        selected = candidates[: self.max_detections]
+        if not with_timings:
+            return selected
+        return selected, {
+            "dino_preprocess_ms": round(preprocess_ms, 1),
+            "dino_input_height": int(inputs.pixel_values.shape[-2]),
+            "dino_input_width": int(inputs.pixel_values.shape[-1]),
+            "dino_inference_ms": round(inference_ms, 1),
+            "dino_postprocess_ms": round((time.perf_counter() - postprocess_at) * 1000, 1),
+            "sign_candidates": len(candidates),
+        }
 
     def _run_ocr(
         self, crop: Image.Image
