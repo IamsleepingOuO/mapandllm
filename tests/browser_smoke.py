@@ -47,7 +47,7 @@ def main():
             (folder / "room_data.json").write_text(json.dumps({"2": {"portal": True}, "3": {"names": ["A"]}, "4": {"names": ["B"]}}))
             navigation.ROOMS[room_id].update(status="ready", image_url=f"/uploads/{image_path.name}", csv_path=str(folder / "map_matrix.csv"), json_path=str(folder / "room_data.json"), navigation_path=str(folder / "room_data.json"))
 
-        patches = [patch.object(navigation, "UPLOAD_DIR", root), patch.object(navigation, "YOLO_MODEL_PATH", weight), patch.object(navigation, "process_map_background", process), patch.object(navigation, "get_user_location", return_value={"current_room_id": "3", "destination_id": "4"}), patch.object(navigation.IndoorNavigator, "generate_llm_guidance", return_value=("從 A 向右走到 B。", None, [[70, 100], [250, 100]])), patch.object(server, "SAVE_ROOT", root / "saved"), patch.object(server, "recognize_image", return_value=[{"box": [10, 10, 100, 60], "text": "A", "ocr_score": 0.99, "detector_label": "sign", "detector_score": 0.9, "lines": []}])]
+        patches = [patch.object(navigation, "camera_warmup_callback", None), patch.object(navigation, "UPLOAD_DIR", root), patch.object(navigation, "YOLO_MODEL_PATH", weight), patch.object(navigation, "process_map_background", process), patch.object(navigation, "get_user_location", return_value={"current_room_id": "3", "destination_id": "4"}), patch.object(navigation.IndoorNavigator, "generate_llm_guidance", return_value=("從 A 向右走到 B。", None, [[70, 100], [250, 100]])), patch.object(server, "SAVE_ROOT", root / "saved"), patch.object(server, "recognize_image", return_value=[{"box": [10, 10, 100, 60], "text": "A", "ocr_score": 0.99, "detector_label": "sign", "detector_score": 0.9, "lines": []}])]
         for item in patches: item.start()
         sock = socket.socket()
         sock.bind(("127.0.0.1", 0))
@@ -79,7 +79,10 @@ def main():
                 page.click("#chatSendButton")
                 expect(page.locator("#chatMessages")).to_contain_text("從 A 向右走到 B。")
                 page.click("#mapButton")
-                expect(page.locator("#path-svg polyline")).to_have_attribute("points", "70,100 250,100")
+                expect(page.locator("#path-svg polyline")).to_have_count(2)
+                expect(page.locator("#path-svg polyline").nth(1)).to_have_attribute("points", "70,100 250,100")
+                expect(page.locator("#navigation-guidance")).to_be_visible()
+                expect(page.locator("#navigation-step-text")).to_contain_text("向右")
                 assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
                 page.screenshot(animations="disabled", path="/home/chh/mapandllm-v2/test-artifacts/mapandllm-v2-map.png")
                 # Verify room sharing from the invitation URL in a second browser.

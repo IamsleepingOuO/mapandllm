@@ -140,10 +140,12 @@ class IntegrationTests(unittest.TestCase):
         self.prepare_map()
         with patch.object(navigation, "get_user_location", return_value={"current_room_id": "2", "destination_id": "3"}) as locate, patch.object(navigation, "IndoorNavigator") as nav:
             nav.return_value.generate_llm_guidance.return_value = ("向右走", None, [[10, 20], [30, 20]])
-            result = self.client.post("/api/chat", json={"room_id": self.room["room_id"], "message": "我要去 B", "recognized_stores": [" A "]})
+            result = self.client.post("/api/chat", json={"room_id": self.room["room_id"], "message": "我要去 B", "recognized_stores": [" A "], "user_id": "camera-user"})
         self.assertEqual(result.status_code, 200)
         self.assertEqual(locate.call_args.args[2], ["A"])
         self.assertEqual(result.json()["path_coords"], [[10, 20], [30, 20]])
+        self.assertEqual(result.json()["navigation_steps"][0]["instruction"], "沿地圖向右前進至下一個轉折點。")
+        self.assertEqual(navigation.ROOMS[self.room["room_id"]]["active_navigations"]["camera-user"]["destination_id"], "3")
 
     def test_llm_prompt_and_invalid_location(self):
         with patch.object(navigation.ollama, "generate", return_value={"response": '{"current_room_id":"999", "destination_id":"3"}'}) as generate:
@@ -184,12 +186,14 @@ class IntegrationTests(unittest.TestCase):
         with patch.object(server, "SAVE_ROOT", self.root), patch.object(
             navigation.ollama, "generate", return_value={"response": '{"place_id":"999"}'}):
             invalid = self.client.post("/api/locate_from_ocr", json=body)
-        self.assertEqual(invalid.json()["status"], "no_match")
+        self.assertEqual(invalid.json()["status"], "located")
+        self.assertEqual(invalid.json()["match_source"], "exact_ocr_alias_fallback")
         self.assertEqual(navigation.ROOMS[self.room["room_id"]]["users"]["camera-user"]["x"], 12)
         with patch.object(server, "SAVE_ROOT", self.root), patch.object(
             navigation.ollama, "generate", side_effect=RuntimeError("offline")):
             offline = self.client.post("/api/locate_from_ocr", json=body)
-        self.assertEqual(offline.json()["status"], "llm_unavailable")
+        self.assertEqual(offline.json()["status"], "located")
+        self.assertEqual(offline.json()["match_source"], "exact_ocr_alias_fallback")
         self.assertEqual(self.client.post("/api/locate_from_ocr", json={**body,
             "capture_id": "../secrets"}).status_code, 422)
 
@@ -199,6 +203,51 @@ class IntegrationTests(unittest.TestCase):
             self.assertEqual(self.client.post(path, json={"user_id": uid, "x": 1, "y": 2, "color": "#ffffff"}).json()["status"], "ok")
         self.assertEqual(self.client.post(path, json={"user_id": "c", "x": 1, "y": 2, "color": "#ffffff"}).json()["status"], "full")
         self.assertEqual(self.client.post(path, json={"user_id": "a", "x": -1, "y": 2, "color": "#ffffff"}).status_code, 422)
+
+    def test_camera_location_advances_step_without_changing_destination(self):
+        self.prepare_map()
+        room = navigation.ROOMS[self.room["room_id"]]
+        room["active_navigations"] = {"camera-user": {
+            "destination_id": "3", "destination_name": "Bravo",
+            "steps": navigation._route_steps([[0, 0], [10, 0], [10, 10]], "Bravo")}}
+        map_path = Path(room["navigation_path"])
+        data = json.loads(map_path.read_text())
+        data["map"].update(image_width=100, image_height=100)
+        data["places"]["2"]["attachment_point"] = [9, 0]
+        map_path.write_text(json.dumps(data))
+        ocr = {"ok": True, "detections": [{"text": "Alpha"}]}
+        with patch.object(navigation.ollama, "generate", return_value={"response": '{"place_id":"2"}'}):
+            result = navigation.locate_from_ocr(self.room["room_id"], ocr, "camera-user", "#6ee7a8")
+        self.assertEqual(result["destination_id"], "3")
+        self.assertEqual(room["active_navigations"]["camera-user"]["destination_id"], "3")
+        self.assertEqual(result["current_step"]["active_index"], 1)
+
+    def test_language_variants_are_corrected_by_explicit_map_names(self):
+        self.prepare_map()
+        data = json.loads(Path(navigation.ROOMS[self.room["room_id"]]["navigation_path"]).read_text())
+        phrases = ("我在 Alpha，請帶我去 Bravo", "從 Alpha 前往 Bravo", "Alpha 到 Bravo 怎麼走", "from Alpha to Bravo")
+        with patch.object(navigation.ollama, "generate", return_value={"response": '{"current_room_id":"3","destination_id":"2"}'}):
+            for phrase in phrases:
+                with self.subTest(phrase=phrase):
+                    result = navigation.get_user_location(phrase, data)
+                    self.assertEqual((result["current_room_id"], result["destination_id"]), ("2", "3"))
+
+    def test_translated_brand_names_override_wrong_valid_llm_ids(self):
+        data = {"places": {
+            "12": {"display_name": "PUMA", "names": ["PUMA"], "aliases": []},
+            "14": {"display_name": "Columbia", "names": ["Columbia"], "aliases": []},
+            "88": {"display_name": "Samsonite", "names": ["Samsonite"], "aliases": []}}}
+        with patch.object(navigation.ollama, "generate", return_value={"response": '{"current_room_id":"88","destination_id":"88"}'}):
+            result = navigation.get_user_location("從彪馬走到哥倫比亞", data)
+        self.assertEqual((result["current_room_id"], result["destination_id"]), ("12", "14"))
+
+    def test_unique_camera_place_is_start_only(self):
+        self.prepare_map()
+        data = json.loads(Path(navigation.ROOMS[self.room["room_id"]]["navigation_path"]).read_text())
+        with patch.object(navigation.ollama, "generate", return_value={"response": '{"current_room_id":null,"destination_id":"3"}'}):
+            result = navigation.get_user_location("帶我去 Bravo", data, ["Alpha"])
+        self.assertEqual(result["current_room_id"], "2")
+        self.assertEqual(result["destination_id"], "3")
 
     def test_topology_route_prefers_fewer_turns_within_detour_limit(self):
         self.prepare_map()

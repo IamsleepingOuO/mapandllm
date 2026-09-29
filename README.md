@@ -70,6 +70,26 @@ OCR_ENABLE_MKLDNN=0
 
 ## 測試
 
+單獨以保存的相片 OCR 結果測試定位（預設驗證 PUMA、ID 12、座標 2977×433）：
+
+```bash
+cd /home/chh/mapandllm
+conda run -n mapandllm-v2 python scripts/test_photo_location.py
+```
+
+若要強制要求結果必須由 LLM 回傳，而不能使用精確店名備援：
+
+```bash
+conda run -n mapandllm-v2 python scripts/test_photo_location.py --require-llm
+```
+
+GPU 記憶體不足時可用已安裝的小模型走 CPU：
+
+```bash
+conda run -n mapandllm-v2 python scripts/test_photo_location.py \
+  --model TwinkleAI/gemma-3-4B-T1-it:latest --cpu --require-llm
+```
+
 ```bash
 conda activate sign-ocr-live
 cd ~/mapandllm-v2

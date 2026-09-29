@@ -174,6 +174,7 @@ function handleStepDetected() {
     myPosition.y = walkY;
 
     updateDotUI(myUserId, myPosition.x, myPosition.y, myColor);
+    window.updateNavigationGuidance?.(myPosition);
     syncPosition();
 }
 
@@ -202,11 +203,16 @@ function drawPathOnMap(coords) {
     svg.innerHTML = '';
     svg.setAttribute('viewBox', `0 0 ${img.naturalWidth} ${img.naturalHeight}`);
     const pointsString = coords.map(p => `${p[0]},${p[1]}`).join(' ');
-    const polyline = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
-    polyline.setAttribute('points', pointsString);
-    polyline.setAttribute('fill', 'none'); polyline.setAttribute('stroke', '#fbbf24');
-    polyline.setAttribute('stroke-width', '8'); polyline.setAttribute('stroke-linecap', 'round');
-    svg.appendChild(polyline);
+    const makeLine = (stroke, width) => {
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+        line.setAttribute('points', pointsString); line.setAttribute('fill', 'none');
+        line.setAttribute('stroke', stroke); line.setAttribute('stroke-width', width);
+        line.setAttribute('stroke-linecap', 'round'); line.setAttribute('stroke-linejoin', 'round');
+        return line;
+    };
+    // Match the debug route: a dark outline under a bright yellow route.
+    svg.appendChild(makeLine('rgba(20,20,20,.85)', '12'));
+    svg.appendChild(makeLine('#facc15', '6'));
     svg.classList.remove('opacity-0'); svg.classList.add('opacity-100');
 }
 
@@ -257,7 +263,6 @@ document.getElementById('map-image').addEventListener('click', (e) => {
         alert(`✅ 校正完成！\n（步長：${customStepPx.toFixed(1)}px / 角度：${targetMapAngle.toFixed(1)}°）\n\n👉 準備好後，請「面向您剛剛行走的方向」，並點擊右下角的按鈕開始導航！`);
 
         const btn = document.getElementById('start-tracking-btn');
-        btn.classList.remove('hidden');
         btn.textContent = "🧭 開始室內導航";
         btn.disabled = false;
         btn.classList.replace('bg-gray-400', 'bg-green-600');
@@ -274,7 +279,7 @@ function resetNavigationTracking() {
   document.querySelectorAll(".user-dot").forEach(dot => dot.remove());
   document.getElementById("path-svg").replaceChildren();
   const button = document.getElementById("start-tracking-btn");
-  button.classList.add("hidden");
-  button.disabled = false;
+  button.textContent = "完成兩點校正後開始步行定位";
+  button.disabled = true;
 }
 document.getElementById("start-tracking-btn").addEventListener("click", requestSensorAccess);

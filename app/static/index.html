@@ -77,8 +77,12 @@
           </div>
         </div>
         <div class="map-footer">
+          <div id="navigation-guidance" class="navigation-guidance" hidden aria-live="polite">
+            <strong id="navigation-step-count"></strong>
+            <span id="navigation-step-text"></span>
+          </div>
           <p>步行定位：點地圖設定起點，走一段並數步數，再點終點校正。</p>
-          <button id="start-tracking-btn" class="glass-button hidden" type="button">開始步行定位</button>
+          <button id="start-tracking-btn" class="glass-button" type="button" disabled>完成兩點校正後開始步行定位</button>
           <span id="heading-display"></span>
         </div>
       </section>

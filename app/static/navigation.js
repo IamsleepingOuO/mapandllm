@@ -15,11 +15,38 @@ const myColor = "#6ee7a8";
   let imageUrl = null;
   let roomBusy = false;
   let pendingPath = null;
+  let navigationSteps = [];
+  let activeDestination = null;
 
   function status(message, error = false) {
     el("mapStatus").textContent = message;
     el("mapStatus").classList.toggle("error", error);
   }
+  function showNavigationStep(step) {
+    const panel = el("navigation-guidance");
+    if (!step) { panel.hidden = true; return; }
+    const index = Number.isInteger(step.active_index) ? step.active_index : step.index;
+    el("navigation-step-count").textContent = `步驟 ${index + 1} / ${step.total || navigationSteps.length}`;
+    el("navigation-step-text").textContent = step.instruction;
+    panel.hidden = false;
+  }
+  function updateGuidanceForPosition(position) {
+    if (!position || !navigationSteps.length) return;
+    let best = null;
+    navigationSteps.slice(0, -1).forEach((step, index) => {
+      const [ax, ay] = step.start, [bx, by] = step.end;
+      const dx = bx - ax, dy = by - ay, lengthSq = dx * dx + dy * dy;
+      const progress = lengthSq ? Math.max(0, Math.min(1, ((position.x-ax)*dx + (position.y-ay)*dy) / lengthSq)) : 0;
+      const px = ax + progress * dx, py = ay + progress * dy;
+      const distanceSq = (position.x-px) ** 2 + (position.y-py) ** 2;
+      if (!best || distanceSq < best.distanceSq) best = {distanceSq, index, progress};
+    });
+    let index = best ? best.index + (best.progress >= .85 ? 1 : 0) : 0;
+    index = Math.min(index, navigationSteps.length - 1);
+    showNavigationStep({...navigationSteps[index], active_index: index, total: navigationSteps.length});
+  }
+  window.updateNavigationGuidance = updateGuidanceForPosition;
+
   async function api(path, options = {}) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 250000);
@@ -35,6 +62,9 @@ const myColor = "#6ee7a8";
   function resetMap() {
     isMapReady = false;
     pendingPath = null;
+    navigationSteps = [];
+    activeDestination = null;
+    showNavigationStep(null);
     imageUrl = null;
     resetNavigationTracking();
     el("map-wrapper").hidden = true;
@@ -154,10 +184,13 @@ const myColor = "#6ee7a8";
     if (!currentRoomId) throw new Error("請先到地圖面板建立或加入房間");
     if (!isMapReady) throw new Error("請先上傳地圖並等候解析完成");
     const version = generation;
-    const data = await post("/api/chat", {message, room_id: currentRoomId, recognized_stores: stores});
+    const data = await post("/api/chat", {message, room_id: currentRoomId, recognized_stores: stores, user_id: myUserId});
     if (version !== generation) throw new Error("地圖或房間已變更，請重新詢問");
     if (data.path_coords?.length) {
       pendingPath = data.path_coords;
+      navigationSteps = data.navigation_steps || [];
+      activeDestination = data.resolved_end_id || activeDestination;
+      showNavigationStep(navigationSteps.length ? {...navigationSteps[0], active_index: 0, total: navigationSteps.length} : null);
       if (el("map-image").complete && el("map-image").naturalWidth) drawPathOnMap(pendingPath);
       calculateAngleFromPath(pendingPath);
       myPosition = {x: pendingPath[0][0], y: pendingPath[0][1]};
@@ -184,7 +217,10 @@ const myColor = "#6ee7a8";
       const image = el("map-image");
       if (image.complete && image.naturalWidth) updateDotUI(myUserId, result.x, result.y, myColor);
       else image.addEventListener("load", () => updateDotUI(myUserId, result.x, result.y, myColor), {once: true});
-      status(`相機定位：${result.place_name}`);
+      // A camera fix advances guidance but never replaces the route destination.
+      if (result.current_step) showNavigationStep(result.current_step);
+      else updateGuidanceForPosition(myPosition);
+      status(`相機定位：${result.place_name}${activeDestination ? "；目的地保持不變" : ""}`);
     } else if (result.status === "full") {
       status("房間已達兩人定位上限", true);
     }
