@@ -1,17 +1,16 @@
-# --- Web 伺服器與 API 架構 ---
-fastapi
-uvicorn[standard]
-python-multipart
-pydantic
+# 先另外安裝 PyTorch GPU 與 PaddlePaddle CPU；不要把兩個 runtime 寫在此檔案。
+fastapi>=0.115,<1
+uvicorn[standard]>=0.34,<1
+python-multipart>=0.0.20,<1
+Pillow>=10,<13
+numpy>=1.26,<3
+transformers>=4.51,<6
+accelerate>=1,<2
+paddleocr>=3.0,<4
 
-# --- 影像處理與資料科學 ---
-# 註：如果在沒有 GUI (桌面環境) 的純文字 Linux 伺服器上，
-# 建議把 opencv-python 改成 opencv-python-headless 以避免缺少 .so 函式庫錯誤
-opencv-python
-numpy
-pandas
-
-# --- AI 與深度學習模組 ---
-easyocr
-ultralytics
-ollama
+# Map analysis (OpenCV provided by paddleocr)
+easyocr>=1.7,<2
+ultralytics>=8.3,<9
+httpx>=0.28,<1
+pandas>=2,<4
+networkx>=3.1,<4
