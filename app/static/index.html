@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="theme-color" content="#000000">
   <title>MapAndLLM 視覺導航</title>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=20261002-2">
 </head>
 <body>
   <!-- 相機授權前：只顯示簡潔的啟動畫面 -->
@@ -26,7 +26,7 @@
   <main id="cameraApp" class="camera-app" aria-hidden="true">
     <div id="cameraStage" class="camera-stage">
       <video id="cameraVideo" autoplay muted playsinline></video>
-      <canvas id="overlayCanvas" aria-hidden="true"></canvas>
+      <canvas id="overlayCanvas" hidden aria-hidden="true"></canvas>
 
       <div class="camera-shade camera-shade-top" aria-hidden="true"></div>
       <div class="camera-shade camera-shade-bottom" aria-hidden="true"></div>
@@ -46,6 +46,12 @@
       <!-- 最近辨識到的文字，保持低干擾 -->
       <div id="recognitionToast" class="recognition-toast" hidden>
         <span id="recognitionText"></span>
+      </div>
+
+      <!-- 導航步驟直接顯示在相機畫面上 -->
+      <div id="navigation-guidance" class="navigation-guidance" hidden aria-live="polite">
+        <strong id="navigation-step-count"></strong>
+        <span id="navigation-step-text"></span>
       </div>
 
       <!-- 地圖面板 -->
@@ -77,10 +83,6 @@
           </div>
         </div>
         <div class="map-footer">
-          <div id="navigation-guidance" class="navigation-guidance" hidden aria-live="polite">
-            <strong id="navigation-step-count"></strong>
-            <span id="navigation-step-text"></span>
-          </div>
           <p>步行定位：點地圖設定起點，走一段並數步數，再點終點校正。</p>
           <button id="start-tracking-btn" class="glass-button" type="button" disabled>完成兩點校正後開始步行定位</button>
           <span id="heading-display"></span>
@@ -156,8 +158,8 @@
     <canvas id="captureCanvas" hidden></canvas>
   </main>
 
-  <script src="/static/app.js"></script>
-  <script src="/static/navigation.js"></script>
-  <script src="/static/pdr_engine.js"></script>
+  <script src="/static/app.js?v=20261002-2"></script>
+  <script src="/static/navigation.js?v=20261002-2"></script>
+  <script src="/static/pdr_engine.js?v=20261002-2"></script>
 </body>
 </html>

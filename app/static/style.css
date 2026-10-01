@@ -16,6 +16,7 @@ html,
 body {
   margin: 0;
   width: 100%;
+  height: 100%;
   min-height: 100%;
   background: #050505;
   color: var(--text);
@@ -108,8 +109,12 @@ textarea:focus-visible {
   display: block;
   position: fixed;
   inset: 0;
-  width: 100%;
+  z-index: 0;
+  width: 100vw;
+  height: 100vh;
+  height: 100svh;
   height: 100dvh;
+  min-height: -webkit-fill-available;
   background: #000;
   opacity: 0;
   visibility: hidden;
@@ -117,6 +122,16 @@ textarea:focus-visible {
 }
 
 body.camera-active .launch-screen { display: none; }
+body.camera-active {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  height: 100svh;
+  height: 100dvh;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
 body.camera-active .camera-app {
   opacity: 1;
   visibility: visible;
@@ -124,31 +139,43 @@ body.camera-active .camera-app {
 }
 
 .camera-stage {
-  position: absolute;
+  position: fixed;
   inset: 0;
+  width: 100vw;
+  height: 100vh;
+  height: 100svh;
+  height: 100dvh;
+  min-height: -webkit-fill-available;
   overflow: hidden;
   background: #000;
+  isolation: isolate;
 }
 
 #cameraVideo {
-  position: absolute;
+  position: fixed !important;
   inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
+  z-index: 0;
+  display: block;
+  width: 100vw !important;
+  height: 100vh !important;
+  height: 100dvh !important;
+  min-width: 100vw !important;
+  min-height: 100vh !important;
+  min-height: 100dvh !important;
+  max-width: none;
+  max-height: none;
+  object-fit: cover !important;
+  object-position: center center;
   background: #000;
 }
 
 #overlayCanvas {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
+  display: none !important;
 }
 
 .camera-shade {
   position: absolute;
+  z-index: 2;
   left: 0;
   width: 100%;
   pointer-events: none;
@@ -574,6 +601,32 @@ button:disabled { opacity: .45; cursor: not-allowed; }
   .map-viewport { height: auto; }
 }
 
-.navigation-guidance { margin-bottom: 10px; padding: 10px 12px; border: 1px solid rgba(251,191,36,.55); border-radius: 10px; background: rgba(251,191,36,.12); display: grid; gap: 4px; }
+.navigation-guidance {
+  position: absolute;
+  z-index: 17;
+  left: 50%;
+  bottom: calc(max(160px, env(safe-area-inset-bottom) + 150px));
+  transform: translateX(-50%);
+  width: min(calc(100% - 32px), 440px);
+  padding: 11px 14px;
+  border: 1px solid rgba(251,191,36,.62);
+  border-radius: 14px;
+  background: rgba(12,12,14,.72);
+  box-shadow: 0 8px 28px rgba(0,0,0,.26);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  display: grid;
+  gap: 4px;
+  pointer-events: none;
+}
 .navigation-guidance strong { color: #fbbf24; font-size: 12px; }
-.navigation-guidance span { color: white; line-height: 1.45; }
+.navigation-guidance span { color: white; font-size: 15px; line-height: 1.45; }
+
+@media (orientation: landscape) and (max-height: 520px) {
+  .navigation-guidance {
+    left: max(16px, env(safe-area-inset-left));
+    bottom: max(82px, env(safe-area-inset-bottom) + 72px);
+    transform: none;
+    width: min(46vw, 440px);
+  }
+}

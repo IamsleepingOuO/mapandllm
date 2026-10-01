@@ -83,6 +83,9 @@ def main():
                 expect(page.locator("#path-svg polyline").nth(1)).to_have_attribute("points", "70,100 250,100")
                 expect(page.locator("#navigation-guidance")).to_be_visible()
                 expect(page.locator("#navigation-step-text")).to_contain_text("向右")
+                assert page.locator("#navigation-guidance").evaluate(
+                    "node => node.parentElement.id === 'cameraStage'"
+                )
                 assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
                 page.screenshot(animations="disabled", path="/home/chh/mapandllm-v2/test-artifacts/mapandllm-v2-map.png")
                 # Verify room sharing from the invitation URL in a second browser.
@@ -92,8 +95,36 @@ def main():
                 expect(other.locator("#mapStatus")).to_contain_text("地圖已就緒", timeout=15000)
                 other.close()
                 page.click("#stopButton")
-                page.click("#startButton")
+                page.evaluate("""() => {
+                  const select = document.querySelector('#captureWidth');
+                  select.add(new Option('320 px test', '320'));
+                  select.value = '320';
+                }""")
+                with page.expect_response("**/api/recognize", timeout=20000) as recognition_response:
+                    page.click("#startButton")
+                recognition_payload = recognition_response.value.json()
                 expect(page.locator("#status")).to_have_text("A", timeout=20000)
+                expect(page.locator("#overlayCanvas")).to_be_hidden()
+                fullscreen = page.evaluate("""() => {
+                  const video = document.querySelector('#cameraVideo').getBoundingClientRect();
+                  const stage = document.querySelector('#cameraStage').getBoundingClientRect();
+                  const topUi = getComputedStyle(document.querySelector('.top-ui'));
+                  return {
+                    video: [video.left, video.top, video.width, video.height],
+                    stage: [stage.left, stage.top, stage.width, stage.height],
+                    viewport: [window.innerWidth, window.innerHeight],
+                    objectFit: getComputedStyle(document.querySelector('#cameraVideo')).objectFit,
+                    uiPosition: topUi.position,
+                    source: [document.querySelector('#cameraVideo').videoWidth, document.querySelector('#cameraVideo').videoHeight],
+                    captured: [document.querySelector('#captureCanvas').width, document.querySelector('#captureCanvas').height],
+                  };
+                }""")
+                assert fullscreen["video"] == [0, 0, *fullscreen["viewport"]], fullscreen
+                assert fullscreen["stage"] == [0, 0, *fullscreen["viewport"]], fullscreen
+                assert fullscreen["objectFit"] == "cover"
+                assert fullscreen["uiPosition"] == "absolute"
+                assert fullscreen["captured"] == fullscreen["source"], fullscreen
+                assert recognition_payload["image_width"] == min(320, fullscreen["source"][0])
                 page.click("#chatButton")
                 page.fill("#chatInput", "去 B")
                 with page.expect_request("**/api/chat") as req:

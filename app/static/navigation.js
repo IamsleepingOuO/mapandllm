@@ -217,10 +217,17 @@ const myColor = "#6ee7a8";
       const image = el("map-image");
       if (image.complete && image.naturalWidth) updateDotUI(myUserId, result.x, result.y, myColor);
       else image.addEventListener("load", () => updateDotUI(myUserId, result.x, result.y, myColor), {once: true});
-      // A camera fix advances guidance but never replaces the route destination.
+      // Replan from the camera location while preserving the active destination.
+      if (result.route_replanned && result.path_coords?.length) {
+        pendingPath = result.path_coords;
+        navigationSteps = result.navigation_steps || [];
+        if (image.complete && image.naturalWidth) drawPathOnMap(pendingPath);
+        else image.addEventListener("load", () => drawPathOnMap(pendingPath), {once: true});
+        calculateAngleFromPath(pendingPath);
+      }
       if (result.current_step) showNavigationStep(result.current_step);
       else updateGuidanceForPosition(myPosition);
-      status(`相機定位：${result.place_name}${activeDestination ? "；目的地保持不變" : ""}`);
+      status(`相機定位：${result.place_name}${result.route_replanned ? "；路線已重新規劃" : ""}${activeDestination ? "；目的地保持不變" : ""}`);
     } else if (result.status === "full") {
       status("房間已達兩人定位上限", true);
     }

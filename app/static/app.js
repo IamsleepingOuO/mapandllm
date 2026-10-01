@@ -12,6 +12,8 @@ const video = document.getElementById("cameraVideo");
 const cameraStage = document.getElementById("cameraStage");
 const captureCanvas = document.getElementById("captureCanvas");
 const captureContext = captureCanvas.getContext("2d", { alpha: false });
+const compressionCanvas = document.createElement("canvas");
+const compressionContext = compressionCanvas.getContext("2d", { alpha: false });
 const overlayCanvas = document.getElementById("overlayCanvas");
 const overlayContext = overlayCanvas.getContext("2d");
 
@@ -78,8 +80,10 @@ document.querySelectorAll("[data-close-panel]").forEach((button) => {
 });
 
 window.addEventListener("pagehide", stopCamera);
-window.addEventListener("resize", redrawLastResult);
-window.addEventListener("orientationchange", () => setTimeout(redrawLastResult, 150));
+window.addEventListener("resize", syncCameraViewport);
+window.addEventListener("orientationchange", () => setTimeout(syncCameraViewport, 150));
+window.visualViewport?.addEventListener("resize", syncCameraViewport);
+video.addEventListener("loadedmetadata", syncCameraViewport);
 
 async function startCamera() {
   if (running) return;
@@ -91,8 +95,16 @@ async function startCamera() {
 
   startButton.disabled = true;
   setLaunchStatus("正在要求相機權限……");
+  // Reveal and size the final camera layout before Safari creates its native
+  // video compositor layer. Starting playback while hidden can leave the live
+  // video at its intrinsic (roughly half-screen) size on iOS.
+  document.body.classList.add("camera-active");
+  cameraApp.setAttribute("aria-hidden", "false");
+  launchScreen.setAttribute("aria-hidden", "true");
+  syncCameraViewport();
 
   try {
+    await enterCameraFullscreen();
     stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
       video: {
@@ -116,9 +128,7 @@ async function startCamera() {
     lastCaptureStartedAt = 0;
     locationTimer = setInterval(() => void locateFromLatestOcr(), 5000);
 
-    document.body.classList.add("camera-active");
-    cameraApp.setAttribute("aria-hidden", "false");
-    launchScreen.setAttribute("aria-hidden", "true");
+    syncCameraViewport();
 
     const settings = stream.getVideoTracks()[0].getSettings();
     setStatus(
@@ -133,8 +143,21 @@ async function startCamera() {
     startButton.disabled = false;
     if (stream) stream.getTracks().forEach(track => track.stop());
     stream = null;
+    document.body.classList.remove("camera-active");
+    cameraApp.setAttribute("aria-hidden", "true");
+    launchScreen.setAttribute("aria-hidden", "false");
     setLaunchStatus(cameraErrorMessage(error), true);
   }
+}
+
+function syncCameraViewport() {
+  const width = Math.max(1, Math.round(window.visualViewport?.width || window.innerWidth));
+  const height = Math.max(1, Math.round(window.visualViewport?.height || window.innerHeight));
+  for (const element of [cameraApp, cameraStage, video]) {
+    element.style.setProperty("width", `${width}px`, "important");
+    element.style.setProperty("height", `${height}px`, "important");
+  }
+  redrawLastResult();
 }
 
 function stopCamera() {
@@ -170,6 +193,20 @@ function stopCamera() {
   launchScreen.setAttribute("aria-hidden", "false");
   startButton.disabled = false;
   setLaunchStatus("相機已停止");
+  if (document.fullscreenElement && document.exitFullscreen) {
+    void document.exitFullscreen().catch(() => {});
+  }
+}
+
+async function enterCameraFullscreen() {
+  if (document.fullscreenElement || !document.documentElement.requestFullscreen) return;
+  try {
+    await document.documentElement.requestFullscreen({navigationUI: "hide"});
+  } catch (error) {
+    // iOS Safari and embedded browsers may not expose the Fullscreen API.
+    // The fixed viewport CSS remains the fallback and keeps all UI over the video.
+    console.info("瀏覽器不允許原生全螢幕，改用視窗全螢幕版面", error);
+  }
 }
 
 function waitForVideoMetadata() {
@@ -304,24 +341,25 @@ async function captureAndRecognize(force = false) {
   try {
     const sourceWidth = video.videoWidth;
     const sourceHeight = video.videoHeight;
-    const configuredWidth = Number(captureWidthSelect.value) || 768;
-    const width = Math.min(configuredWidth, sourceWidth);
-    const height = Math.round(sourceHeight * width / sourceWidth);
 
-    if (captureCanvas.width !== width || captureCanvas.height !== height) {
-      captureCanvas.width = width;
-      captureCanvas.height = height;
+    // First take a full-resolution still. Resizing/JPEG compression happens only
+    // after capture and immediately before constructing the upload request.
+    if (captureCanvas.width !== sourceWidth || captureCanvas.height !== sourceHeight) {
+      captureCanvas.width = sourceWidth;
+      captureCanvas.height = sourceHeight;
     }
+    captureContext.drawImage(video, 0, 0, sourceWidth, sourceHeight);
+    const capturedAt = new Date().toISOString();
 
-    captureContext.drawImage(video, 0, 0, width, height);
-    const blob = await canvasToBlob(captureCanvas, "image/jpeg", JPEG_QUALITY);
+    const configuredWidth = Number(captureWidthSelect.value) || 768;
+    const blob = await compressPhotoForUpload(captureCanvas, configuredWidth);
 
-    setStatus(`辨識第 ${frameNumber} 幀…`, "processing");
+    setStatus("正在辨識…", "processing");
 
     const formData = new FormData();
     formData.append("image", blob, `frame-${frameNumber}.jpg`);
     formData.append("frame_number", String(frameNumber));
-    formData.append("captured_at", new Date().toISOString());
+    formData.append("captured_at", capturedAt);
 
     const response = await fetch("/api/recognize", {
       method: "POST",
@@ -347,7 +385,7 @@ async function captureAndRecognize(force = false) {
 
     lastResponse = payload;
     lastRecognitionAt = Date.now();
-    drawDetections(payload);
+    clearDetectionOverlay();
     updateRecognitionToast(payload);
 
     const names = payload.detections
@@ -430,7 +468,7 @@ function drawDetections(payload) {
 }
 
 function redrawLastResult() {
-  if (lastResponse && running) drawDetections(lastResponse);
+  clearDetectionOverlay();
 }
 
 function clearDetectionOverlay() {
@@ -569,6 +607,18 @@ function canvasToBlob(canvas, type, quality) {
   });
 }
 
+async function compressPhotoForUpload(sourceCanvas, maxWidth) {
+  const width = Math.min(Math.max(1, Math.round(maxWidth)), sourceCanvas.width);
+  const height = Math.max(1, Math.round(sourceCanvas.height * width / sourceCanvas.width));
+  if (compressionCanvas.width !== width || compressionCanvas.height !== height) {
+    compressionCanvas.width = width;
+    compressionCanvas.height = height;
+  }
+  compressionContext.clearRect(0, 0, width, height);
+  compressionContext.drawImage(sourceCanvas, 0, 0, width, height);
+  return canvasToBlob(compressionCanvas, "image/jpeg", JPEG_QUALITY);
+}
+
 function cameraErrorMessage(error) {
   switch (error?.name) {
     case "NotAllowedError":
@@ -600,6 +650,7 @@ document.getElementById("navigationOnlyButton").addEventListener("click", () => 
   document.body.classList.add("camera-active");
   cameraApp.setAttribute("aria-hidden", "false");
   launchScreen.setAttribute("aria-hidden", "true");
+  syncCameraViewport();
   captureButton.disabled = true;
   setStatus("地圖與導航模式");
   toggleMainPanel("map");

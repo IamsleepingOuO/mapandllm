@@ -209,6 +209,8 @@ class IntegrationTests(unittest.TestCase):
         room = navigation.ROOMS[self.room["room_id"]]
         room["active_navigations"] = {"camera-user": {
             "destination_id": "3", "destination_name": "Bravo",
+            "current_place_id": "old-place",
+            "path_coords": [[0, 0], [10, 0], [10, 10]],
             "steps": navigation._route_steps([[0, 0], [10, 0], [10, 10]], "Bravo")}}
         map_path = Path(room["navigation_path"])
         data = json.loads(map_path.read_text())
@@ -216,11 +218,23 @@ class IntegrationTests(unittest.TestCase):
         data["places"]["2"]["attachment_point"] = [9, 0]
         map_path.write_text(json.dumps(data))
         ocr = {"ok": True, "detections": [{"text": "Alpha"}]}
-        with patch.object(navigation.ollama, "generate", return_value={"response": '{"place_id":"2"}'}):
+        with patch.object(navigation.ollama, "generate", return_value={"response": '{"place_id":"2"}'}), \
+             patch.object(navigation.IndoorNavigator, "generate_llm_guidance",
+                          return_value=("重新規劃", None, [[9, 0], [9, 10]])) as replan:
             result = navigation.locate_from_ocr(self.room["room_id"], ocr, "camera-user", "#6ee7a8")
         self.assertEqual(result["destination_id"], "3")
         self.assertEqual(room["active_navigations"]["camera-user"]["destination_id"], "3")
-        self.assertEqual(result["current_step"]["active_index"], 1)
+        self.assertTrue(result["route_replanned"])
+        self.assertEqual(result["path_coords"], [[9, 0], [9, 10]])
+        self.assertEqual(result["current_step"]["active_index"], 0)
+        replan.assert_called_once_with("2", "3")
+
+        # The next OCR fix at the same place must not recalculate the same route.
+        with patch.object(navigation.ollama, "generate", return_value={"response": '{"place_id":"2"}'}), \
+             patch.object(navigation.IndoorNavigator, "generate_llm_guidance") as duplicate:
+            repeated = navigation.locate_from_ocr(self.room["room_id"], ocr, "camera-user", "#6ee7a8")
+        self.assertFalse(repeated["route_replanned"])
+        duplicate.assert_not_called()
 
     def test_language_variants_are_corrected_by_explicit_map_names(self):
         self.prepare_map()

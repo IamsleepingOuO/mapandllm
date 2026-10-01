@@ -1715,6 +1715,7 @@ async def chat_with_llama(req_data: ChatRequest):
     if req_data.user_id:
         room.setdefault("active_navigations", {})[req_data.user_id] = {
             "destination_id": str(end_id), "destination_name": destination_name,
+            "current_place_id": str(start_id),
             "path_coords": path_coords or [], "steps": navigation_steps,
         }
     return {
@@ -1803,14 +1804,43 @@ def locate_from_ocr(room_id: str, ocr_data: dict[str, Any], user_id: str, color:
         return {"status": "full"}
     users[user_id] = {"x": x, "y": y, "color": color, "last_update": time.time()}
     room["last_active"] = time.time()
-    # Camera updates location only. The destination remains owned by the active navigation.
+    # Camera updates the start of the active route. The destination remains immutable.
     active = room.get("active_navigations", {}).get(user_id)
-    current_step = _current_route_step(active.get("steps", []), x, y) if active else None
+    route_replanned = False
+    path_coords = active.get("path_coords", []) if active else []
+    navigation_steps = active.get("steps", []) if active else []
+    if active and active.get("current_place_id") != place_id:
+        destination_id = str(active.get("destination_id"))
+        destination_name = active.get("destination_name") or places.get(destination_id, {}).get("display_name", destination_id)
+        if destination_id == place_id:
+            path_coords = [[int(x), int(y)]]
+            navigation_steps = [{
+                "index": 0, "instruction": f"抵達「{destination_name}」。",
+                "start": [int(x), int(y)], "end": [int(x), int(y)],
+            }]
+        elif destination_id in places:
+            navigator = IndoorNavigator(room["navigation_path"], room_id)
+            _reply, debug_url, new_path = navigator.generate_llm_guidance(place_id, destination_id)
+            if new_path:
+                path_coords = new_path
+                navigation_steps = _route_steps(new_path, destination_name)
+                if debug_url:
+                    room["last_debug_route_url"] = debug_url
+        if navigation_steps:
+            active.update({
+                "current_place_id": place_id,
+                "path_coords": path_coords,
+                "steps": navigation_steps,
+            })
+            route_replanned = True
+    current_step = _current_route_step(navigation_steps, x, y) if navigation_steps else None
     return {"status": "located", "place_id": place_id, "place_name": place.get("display_name", place_id),
             "x": x, "y": y,
             "destination_id": active.get("destination_id") if active else None,
             "destination_name": active.get("destination_name") if active else None,
-            "current_step": current_step, "match_source": match_source,
+            "current_step": current_step, "path_coords": path_coords,
+            "navigation_steps": navigation_steps, "route_replanned": route_replanned,
+            "match_source": match_source,
             "llm_place_id": llm_place_id}
 
 
